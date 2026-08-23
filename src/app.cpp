@@ -211,6 +211,9 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     case WM_LBUTTONDBLCLK:
         if (dips(GET_Y_LPARAM(lParam), GetDpiForWindow(window)) < 48) toggleCollapsed();
         return 0;
+    case WM_NCLBUTTONDBLCLK:
+        if (wParam == HTCAPTION) toggleCollapsed();
+        return 0;
     case WM_LBUTTONUP: {
         const UINT dpi = GetDpiForWindow(window);
         const int x = dips(GET_X_LPARAM(lParam), dpi), y = dips(GET_Y_LPARAM(lParam), dpi);
