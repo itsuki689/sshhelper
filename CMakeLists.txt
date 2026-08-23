@@ -23,6 +23,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(libssh2)
 
 add_library(airsftp_core STATIC
+  src/credential_store.cpp
   src/ssh_client.cpp
   src/telemetry.cpp
 )
@@ -43,7 +44,11 @@ endif()
 add_executable(telemetry_parser_test tests/telemetry_parser_test.cpp)
 target_link_libraries(telemetry_parser_test PRIVATE airsftp_core)
 
+add_executable(credential_store_test tests/credential_store_test.cpp)
+target_link_libraries(credential_store_test PRIVATE airsftp_core)
+
 enable_testing()
 add_test(NAME telemetry_parser COMMAND telemetry_parser_test)
+add_test(NAME credential_store COMMAND credential_store_test)
 
 install(TARGETS AirSFTP RUNTIME DESTINATION .)

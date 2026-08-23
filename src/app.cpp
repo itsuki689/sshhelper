@@ -1,5 +1,6 @@
 #include "app.hpp"
 
+#include "credential_store.hpp"
 #include "ssh_client.hpp"
 #include "telemetry.hpp"
 
@@ -187,6 +188,9 @@ App::~App() {
 }
 
 int App::run(int showCommand) {
+    std::string credentialError;
+    if (!loadConnectionCredentials(defaultCredentialPath(), config_, credentialError))
+        snapshot_.status = credentialError;
     if (!registerClasses() || !createMainWindow(showCommand)) return 1;
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -969,7 +973,7 @@ void App::paintSettings() {
 
     SetTextColor(buffer, RGB(142, 142, 147));
     RECT note{p(24), p(371), p(456), p(393)};
-    DrawTextW(buffer, L"密码不落盘 · 私钥口令填在密码框 · 远端需 lm-sensors", -1, &note,
+    DrawTextW(buffer, L"密码由 Windows DPAPI 加密 · 仅当前用户可解密", -1, &note,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     SelectObject(buffer, oldFont);
@@ -1064,6 +1068,7 @@ void App::showSettings() {
     SetWindowTextW(GetDlgItem(settingsWindow_, HostEdit), wide(config_.host).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, PortEdit), std::to_wstring(config_.port).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, UserEdit), wide(config_.username).c_str());
+    SetWindowTextW(GetDlgItem(settingsWindow_, PasswordEdit), wide(config_.password).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, KeyEdit), wide(config_.privateKeyPath).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, LocalEdit), wide(localPath_).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, RemoteEdit), wide(remotePath_.empty() ? "/tmp/" : remotePath_).c_str());
@@ -1152,6 +1157,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
             ConnectionConfig config; std::string local, remote;
             if (readSettings(config, local, remote)) {
                 config_ = config; localPath_ = local; remotePath_ = remote;
+                rememberConnection(config_);
                 startMonitor(config_); ShowWindow(settingsWindow_, SW_HIDE);
             }
             return 0;
@@ -1180,6 +1186,12 @@ bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::st
         return false;
     }
     return true;
+}
+
+void App::rememberConnection(const ConnectionConfig& config) {
+    std::string error;
+    if (!saveConnectionCredentials(defaultCredentialPath(), config, error) && settingsWindow_)
+        MessageBoxW(settingsWindow_, wide(error).c_str(), L"AirSFTP 凭据保存失败", MB_OK | MB_ICONWARNING);
 }
 
 void App::chooseLocalFile(bool saveDialog) {
@@ -1253,6 +1265,7 @@ void App::startTransfer(TransferDirection direction) {
         return;
     }
     config_ = config; localPath_ = local; remotePath_ = remote;
+    rememberConnection(config_);
     startMonitor(config_);
     stopTransfer();
     transferCancelled_.store(false);

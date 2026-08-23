@@ -51,6 +51,7 @@ private:
     bool isCollapsed() const { return collapseMode_ != CollapseMode::Expanded; }
 
     bool readSettings(ConnectionConfig& config, std::string& localPath, std::string& remotePath);
+    void rememberConnection(const ConnectionConfig& config);
     void startMonitor(const ConnectionConfig& config);
     void stopMonitor();
     void startTransfer(TransferDirection direction);
