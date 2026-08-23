@@ -35,6 +35,9 @@ constexpr int RestoreGap = 8;
 constexpr UINT_PTR AnimationTimerId = 1;
 constexpr UINT AnimationFrameMs = 15;
 constexpr ULONGLONG AnimationDurationMs = 180;
+constexpr int SettingsWidth = 480;
+constexpr int SettingsHeight = 456;
+constexpr int SettingsHeaderHeight = 52;
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -106,9 +109,10 @@ void sleepStopped(std::stop_token token, std::chrono::milliseconds duration) {
 
 HWND addControl(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style,
                 int x, int y, int width, int height, int id, HFONT font) {
-    HWND control = CreateWindowExW(
-        wcscmp(cls, WC_EDITW) == 0 ? WS_EX_CLIENTEDGE : 0, cls, text,
-        WS_CHILD | WS_VISIBLE | style, x, y, width, height, parent,
+    DWORD windowStyle = WS_CHILD | WS_VISIBLE | style;
+    if (wcscmp(cls, WC_EDITW) == 0 || wcscmp(cls, WC_BUTTONW) == 0)
+        windowStyle |= WS_TABSTOP;
+    HWND control = CreateWindowExW(0, cls, text, windowStyle, x, y, width, height, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     return control;
@@ -140,8 +144,6 @@ App::App(HINSTANCE instance) : instance_(instance) {
             compactFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
-    uiFont_ = CreateFontW(-pixels(15, GetDpiForSystem()), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
 }
 
 App::~App() {
@@ -151,6 +153,9 @@ App::~App() {
     release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_);
     release(writeFactory_); release(d2dFactory_);
     if (uiFont_) DeleteObject(uiFont_);
+    if (settingsTitleFont_) DeleteObject(settingsTitleFont_);
+    if (settingsLabelFont_) DeleteObject(settingsLabelFont_);
+    if (settingsButtonFont_) DeleteObject(settingsButtonFont_);
 }
 
 int App::run(int showCommand) {
@@ -174,10 +179,11 @@ bool App::registerClasses() {
     if (!RegisterClassExW(&mainClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
     WNDCLASSEXW settingsClass{sizeof(settingsClass)};
+    settingsClass.style = CS_DROPSHADOW | CS_HREDRAW | CS_VREDRAW;
     settingsClass.lpfnWndProc = settingsWindowProc;
     settingsClass.hInstance = instance_;
     settingsClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    settingsClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    settingsClass.hbrBackground = nullptr;
     settingsClass.lpszClassName = SettingsClass;
     return RegisterClassExW(&settingsClass) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
@@ -794,32 +800,222 @@ void App::handleEdgeDock() {
     else collapseHorizontal(true, targetMonitor);
 }
 
-void App::createSettingsWindow() {
-    const UINT dpi = GetDpiForSystem();
-    auto p = [dpi](int value) { return pixels(value, dpi); };
-    settingsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, SettingsClass, L"AirSFTP 设置",
-        WS_CAPTION | WS_SYSMENU | WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, p(500), p(455),
-        window_, nullptr, instance_, this);
-    if (!settingsWindow_) return;
-    const int lx = p(22), ex = p(132), ew = p(330);
-    auto label = [&](const wchar_t* text, int y) {
-        addControl(settingsWindow_, WC_STATICW, text, 0, lx, p(y + 4), p(100), p(24), 0, uiFont_);
+void App::rebuildSettingsFonts(UINT dpi) {
+    auto makeFont = [dpi](int size, int weight) {
+        return CreateFontW(-pixels(size, dpi), 0, 0, 0, weight, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH, L"Microsoft YaHei UI");
     };
-    label(L"主机", 20); addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, ex, p(20), p(240), p(27), HostEdit, uiFont_);
-    label(L"端口", 57); addControl(settingsWindow_, WC_EDITW, L"22", ES_NUMBER, ex, p(57), p(80), p(27), PortEdit, uiFont_);
-    label(L"用户名", 94); addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, ex, p(94), p(240), p(27), UserEdit, uiFont_);
-    label(L"密码/密钥口令", 131); addControl(settingsWindow_, WC_EDITW, L"", ES_PASSWORD | ES_AUTOHSCROLL, ex, p(131), ew, p(27), PasswordEdit, uiFont_);
-    label(L"私钥文件", 168); addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, ex, p(168), ew, p(27), KeyEdit, uiFont_);
-    label(L"本地文件", 215); addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, ex, p(215), p(270), p(27), LocalEdit, uiFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"浏览", BS_PUSHBUTTON, p(408), p(215), p(54), p(27), BrowseLocal, uiFont_);
-    label(L"远程文件", 252); addControl(settingsWindow_, WC_EDITW, L"/tmp/", ES_AUTOHSCROLL, ex, p(252), ew, p(27), RemoteEdit, uiFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"保存并监控", BS_DEFPUSHBUTTON, p(132), p(310), p(110), p(34), SaveConnect, uiFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"上传", BS_PUSHBUTTON, p(252), p(310), p(90), p(34), UploadButton, uiFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"下载", BS_PUSHBUTTON, p(352), p(310), p(90), p(34), DownloadButton, uiFont_);
-    addControl(settingsWindow_, WC_STATICW, L"密码不会保存；选择私钥时密码框作为密钥口令。远端需 Linux + lm-sensors。",
-        0, p(22), p(372), p(440), p(24), 0, uiFont_);
+    HFONT oldUi = uiFont_;
+    HFONT oldTitle = settingsTitleFont_;
+    HFONT oldLabel = settingsLabelFont_;
+    HFONT oldButton = settingsButtonFont_;
+    uiFont_ = makeFont(14, FW_NORMAL);
+    settingsTitleFont_ = makeFont(18, FW_SEMIBOLD);
+    settingsLabelFont_ = makeFont(12, FW_NORMAL);
+    settingsButtonFont_ = makeFont(13, FW_SEMIBOLD);
+
+    if (settingsWindow_) {
+        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit};
+        constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton};
+        for (int id : edits)
+            SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
+                reinterpret_cast<WPARAM>(uiFont_), TRUE);
+        for (int id : buttons)
+            SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
+                reinterpret_cast<WPARAM>(settingsButtonFont_), TRUE);
+    }
+    if (oldUi) DeleteObject(oldUi);
+    if (oldTitle) DeleteObject(oldTitle);
+    if (oldLabel) DeleteObject(oldLabel);
+    if (oldButton) DeleteObject(oldButton);
 }
 
+void App::layoutSettings(UINT dpi) {
+    if (!settingsWindow_) return;
+    auto p = [dpi](int value) { return pixels(value, dpi); };
+    auto move = [&](int id, int x, int y, int width, int height) {
+        MoveWindow(GetDlgItem(settingsWindow_, id), p(x), p(y), p(width), p(height), TRUE);
+    };
+    move(HostEdit, 34, 88, 294, 22);
+    move(PortEdit, 360, 88, 86, 22);
+    move(UserEdit, 34, 150, 156, 22);
+    move(PasswordEdit, 222, 150, 224, 22);
+    move(KeyEdit, 34, 212, 412, 22);
+    move(LocalEdit, 34, 274, 326, 22);
+    move(BrowseLocal, 380, 268, 76, 34);
+    move(RemoteEdit, 34, 336, 412, 22);
+    move(SaveConnect, 162, 401, 126, 38);
+    move(UploadButton, 296, 401, 76, 38);
+    move(DownloadButton, 380, 401, 76, 38);
+
+    constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit};
+    for (int id : edits) {
+        HWND edit = GetDlgItem(settingsWindow_, id);
+        SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            MAKELPARAM(p(2), p(2)));
+    }
+}
+
+void App::paintSettings() {
+    PAINTSTRUCT paint{};
+    HDC target = BeginPaint(settingsWindow_, &paint);
+    RECT client{};
+    GetClientRect(settingsWindow_, &client);
+    HDC buffer = CreateCompatibleDC(target);
+    HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
+    HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
+    const UINT dpi = GetDpiForWindow(settingsWindow_);
+    auto p = [dpi](int value) { return pixels(value, dpi); };
+
+    HBRUSH background = CreateSolidBrush(RGB(246, 246, 248));
+    FillRect(buffer, &client, background);
+    DeleteObject(background);
+    RECT header{0, 0, client.right, p(SettingsHeaderHeight)};
+    HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(buffer, &header, white);
+
+    HPEN separator = CreatePen(PS_SOLID, std::max(1, p(1)), RGB(229, 229, 234));
+    HGDIOBJ oldPen = SelectObject(buffer, separator);
+    MoveToEx(buffer, 0, p(SettingsHeaderHeight) - 1, nullptr);
+    LineTo(buffer, client.right, p(SettingsHeaderHeight) - 1);
+
+    HPEN fieldPen = CreatePen(PS_SOLID, std::max(1, p(1)), RGB(218, 218, 223));
+    SelectObject(buffer, fieldPen);
+    HGDIOBJ oldBrush = SelectObject(buffer, white);
+    auto field = [&](int x, int y, int width, int height) {
+        RoundRect(buffer, p(x), p(y), p(x + width), p(y + height), p(10), p(10));
+    };
+    field(24, 82, 314, 34);
+    field(350, 82, 106, 34);
+    field(24, 144, 176, 34);
+    field(212, 144, 244, 34);
+    field(24, 206, 432, 34);
+    field(24, 268, 346, 34);
+    field(24, 330, 432, 34);
+
+    SetBkMode(buffer, TRANSPARENT);
+    SetTextColor(buffer, RGB(29, 29, 31));
+    HGDIOBJ oldFont = SelectObject(buffer, settingsTitleFont_);
+    RECT title{p(22), p(9), p(340), p(45)};
+    DrawTextW(buffer, L"连接与传输", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+    HBRUSH closeBrush = CreateSolidBrush(RGB(241, 241, 244));
+    SelectObject(buffer, GetStockObject(NULL_PEN));
+    SelectObject(buffer, closeBrush);
+    Ellipse(buffer, p(437), p(12), p(465), p(40));
+    SelectObject(buffer, settingsButtonFont_);
+    SetTextColor(buffer, RGB(110, 110, 115));
+    RECT closeRect{p(437), p(11), p(465), p(40)};
+    DrawTextW(buffer, L"×", -1, &closeRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(buffer, white);
+    DeleteObject(closeBrush);
+
+    SelectObject(buffer, settingsLabelFont_);
+    SetTextColor(buffer, RGB(110, 110, 115));
+    auto label = [&](const wchar_t* value, int x, int y, int width) {
+        RECT rect{p(x), p(y), p(x + width), p(y + 18)};
+        DrawTextW(buffer, value, -1, &rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    };
+    label(L"主机", 24, 61, 314);
+    label(L"端口", 350, 61, 106);
+    label(L"用户名", 24, 123, 176);
+    label(L"密码 / 密钥口令", 212, 123, 244);
+    label(L"私钥文件（可选）", 24, 185, 432);
+    label(L"本地文件", 24, 247, 346);
+    label(L"远程文件", 24, 309, 432);
+
+    SetTextColor(buffer, RGB(142, 142, 147));
+    RECT note{p(24), p(371), p(456), p(393)};
+    DrawTextW(buffer, L"密码不落盘 · 私钥口令填在密码框 · 远端需 lm-sensors", -1, &note,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+    SelectObject(buffer, oldFont);
+    SelectObject(buffer, oldBrush);
+    SelectObject(buffer, oldPen);
+    DeleteObject(fieldPen);
+    DeleteObject(separator);
+    DeleteObject(white);
+    BitBlt(target, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+    SelectObject(buffer, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(buffer);
+    EndPaint(settingsWindow_, &paint);
+}
+
+void App::drawSettingsButton(const DRAWITEMSTRUCT& item) {
+    const bool primary = item.CtlID == SaveConnect;
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool disabled = (item.itemState & ODS_DISABLED) != 0;
+    const bool focused = (item.itemState & ODS_FOCUS) != 0;
+    const UINT dpi = GetDpiForWindow(settingsWindow_);
+    auto p = [dpi](int value) { return pixels(value, dpi); };
+    COLORREF fill = primary ? RGB(0, 122, 255) : RGB(255, 255, 255);
+    COLORREF border = primary ? RGB(0, 122, 255) : RGB(209, 209, 214);
+    COLORREF textColor = primary ? RGB(255, 255, 255) : RGB(0, 113, 227);
+    if (pressed) fill = primary ? RGB(0, 101, 214) : RGB(236, 243, 252);
+    if (disabled) {
+        fill = RGB(235, 235, 238);
+        border = RGB(222, 222, 226);
+        textColor = RGB(160, 160, 165);
+    }
+    if (focused && !primary) border = RGB(0, 122, 255);
+
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, focused ? std::max(1, p(2)) : std::max(1, p(1)), border);
+    HGDIOBJ oldBrush = SelectObject(item.hDC, brush);
+    HGDIOBJ oldPen = SelectObject(item.hDC, pen);
+    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom,
+        p(10), p(10));
+    SetBkMode(item.hDC, TRANSPARENT);
+    SetTextColor(item.hDC, textColor);
+    HGDIOBJ oldFont = SelectObject(item.hDC, settingsButtonFont_);
+    wchar_t text[64]{};
+    GetWindowTextW(item.hwndItem, text, 64);
+    RECT textRect = item.rcItem;
+    if (pressed) OffsetRect(&textRect, 0, p(1));
+    DrawTextW(item.hDC, text, -1, &textRect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(item.hDC, oldFont);
+    SelectObject(item.hDC, oldPen);
+    SelectObject(item.hDC, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void App::createSettingsWindow() {
+    const UINT dpi = GetDpiForWindow(window_);
+    settingsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, SettingsClass, L"AirSFTP 设置",
+        WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
+        pixels(SettingsWidth, dpi), pixels(SettingsHeight, dpi),
+        window_, nullptr, instance_, this);
+    if (!settingsWindow_) return;
+    constexpr DWORD roundPreference = 2;
+    constexpr auto cornerAttribute = static_cast<DWMWINDOWATTRIBUTE>(33);
+    DwmSetWindowAttribute(settingsWindow_, cornerAttribute, &roundPreference, sizeof(roundPreference));
+    rebuildSettingsFonts(dpi);
+
+    HWND host = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, HostEdit, uiFont_);
+    HWND port = addControl(settingsWindow_, WC_EDITW, L"22", ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 1, 1, PortEdit, uiFont_);
+    HWND user = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, UserEdit, uiFont_);
+    HWND password = addControl(settingsWindow_, WC_EDITW, L"", ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 1, 1, PasswordEdit, uiFont_);
+    HWND key = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, KeyEdit, uiFont_);
+    HWND local = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, LocalEdit, uiFont_);
+    HWND remote = addControl(settingsWindow_, WC_EDITW, L"/tmp/", ES_AUTOHSCROLL, 0, 0, 1, 1, RemoteEdit, uiFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"浏览", BS_OWNERDRAW, 0, 0, 1, 1, BrowseLocal, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"连接并监控", BS_OWNERDRAW, 0, 0, 1, 1, SaveConnect, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"上传", BS_OWNERDRAW, 0, 0, 1, 1, UploadButton, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"下载", BS_OWNERDRAW, 0, 0, 1, 1, DownloadButton, settingsButtonFont_);
+
+    SendMessageW(host, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.1.10"));
+    SendMessageW(port, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"22"));
+    SendMessageW(user, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"root"));
+    SendMessageW(password, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"密码或私钥口令"));
+    SendMessageW(key, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"可选：私钥文件路径"));
+    SendMessageW(local, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"选择本地文件"));
+    SendMessageW(remote, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"/tmp/file"));
+    layoutSettings(dpi);
+}
 void App::showSettings() {
     if (!settingsWindow_) createSettingsWindow();
     if (!settingsWindow_) return;
@@ -835,8 +1031,8 @@ void App::showSettings() {
     GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
     const int dialogWidth = dialog.right - dialog.left;
     const int dialogHeight = dialog.bottom - dialog.top;
-    const int desiredX = owner.left - (dialogWidth - pixels(MainWidth, dpi)) / 2;
-    const int desiredY = owner.top - pixels(60, dpi);
+    const int desiredX = owner.left + ((owner.right - owner.left) - dialogWidth) / 2;
+    const int desiredY = owner.top + ((owner.bottom - owner.top) - dialogHeight) / 2;
     const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - dialogWidth);
     const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), static_cast<int>(monitor.rcWork.bottom) - dialogHeight);
     SetWindowPos(settingsWindow_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
@@ -854,6 +1050,59 @@ LRESULT CALLBACK App::settingsWindowProc(HWND window, UINT message, WPARAM wPara
 
 LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_PAINT:
+        paintSettings();
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DRAWITEM: {
+        const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (item && item->CtlType == ODT_BUTTON) {
+            drawSettingsButton(*item);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkColor(dc, RGB(255, 255, 255));
+        SetTextColor(dc, RGB(29, 29, 31));
+        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+    }
+    case WM_DPICHANGED: {
+        const UINT dpi = HIWORD(wParam);
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(window, nullptr, suggested->left, suggested->top,
+            pixels(SettingsWidth, dpi), pixels(SettingsHeight, dpi),
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        rebuildSettingsFonts(dpi);
+        layoutSettings(dpi);
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    }
+    case WM_NCHITTEST: {
+        POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        ScreenToClient(window, &point);
+        const UINT dpi = GetDpiForWindow(window);
+        const int x = dips(point.x, dpi);
+        const int y = dips(point.y, dpi);
+        if (y >= 0 && y < SettingsHeaderHeight && x < SettingsWidth - 50) return HTCAPTION;
+        return HTCLIENT;
+    }
+    case WM_LBUTTONUP: {
+        const UINT dpi = GetDpiForWindow(window);
+        const int x = dips(GET_X_LPARAM(lParam), dpi);
+        const int y = dips(GET_Y_LPARAM(lParam), dpi);
+        if (y >= 0 && y < SettingsHeaderHeight && x >= SettingsWidth - 50)
+            ShowWindow(window, SW_HIDE);
+        return 0;
+    }
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        }
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case BrowseLocal: chooseLocalFile(false); return 0;
@@ -874,7 +1123,6 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
-
 bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::string& remotePath) {
     config.host = utf8(controlText(settingsWindow_, HostEdit));
     config.username = utf8(controlText(settingsWindow_, UserEdit));

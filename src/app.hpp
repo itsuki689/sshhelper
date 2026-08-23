@@ -30,6 +30,10 @@ private:
     bool createMainWindow(int showCommand);
     void createSettingsWindow();
     void showSettings();
+    void paintSettings();
+    void drawSettingsButton(const DRAWITEMSTRUCT& item);
+    void rebuildSettingsFonts(UINT dpi);
+    void layoutSettings(UINT dpi);
     void paint();
     void discardGraphics();
     bool ensureGraphics();
@@ -59,6 +63,9 @@ private:
     HWND window_ = nullptr;
     HWND settingsWindow_ = nullptr;
     HFONT uiFont_ = nullptr;
+    HFONT settingsTitleFont_ = nullptr;
+    HFONT settingsLabelFont_ = nullptr;
+    HFONT settingsButtonFont_ = nullptr;
     CollapseMode collapseMode_ = CollapseMode::Expanded;
     RECT expandedRect_{};
     bool hasExpandedRect_ = false;
