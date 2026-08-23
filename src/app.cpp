@@ -98,6 +98,13 @@ std::wstring numberText(double value, const wchar_t* suffix = L"") {
     return buffer;
 }
 
+std::wstring storageText(std::uint64_t bytes) {
+    constexpr double BytesPerGigabyte = 1'000'000'000.0;
+    wchar_t buffer[64]{};
+    swprintf(buffer, 64, L"%.3f GB", static_cast<double>(bytes) / BytesPerGigabyte);
+    return buffer;
+}
+
 float ratio(std::uint64_t used, std::uint64_t total) {
     return total ? std::clamp(static_cast<float>(used) / static_cast<float>(total), 0.0f, 1.0f) : 0.0f;
 }
@@ -492,12 +499,14 @@ void App::paint() {
     release(statusBrush);
 
     if (collapseMode_ == CollapseMode::Expanded) {
-        auto card = [&](float x, float y, float width, const std::wstring& label, const std::wstring& value, float level) {
+        auto card = [&](float x, float y, float width, const std::wstring& label,
+                        const std::wstring& value, float level, IDWriteTextFormat* valueFormat = nullptr) {
             const auto box = D2D1::RoundedRect(D2D1::RectF(x, y, x + width, y + 66), 11, 11);
             renderTarget_->FillRoundedRectangle(box, surfaceBrush_);
             renderTarget_->DrawRoundedRectangle(box, lineBrush_, 1);
             drawText(renderTarget_, labelFormat_, mutedBrush_, label, D2D1::RectF(x + 11, y + 8, x + width - 8, y + 27));
-            drawText(renderTarget_, metricFormat_, textBrush_, value, D2D1::RectF(x + 10, y + 26, x + width - 8, y + 57));
+            drawText(renderTarget_, valueFormat ? valueFormat : metricFormat_, textBrush_, value,
+                D2D1::RectF(valueFormat ? x + 2 : x + 10, y + 26, valueFormat ? x + width - 2 : x + width - 8, y + 57));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + width - 10, y + 61), 2, 2), lineBrush_);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + 10 + (width - 20) * std::clamp(level, 0.0f, 1.0f), y + 61), 2, 2), accentBrush_);
         };
@@ -507,7 +516,8 @@ void App::paint() {
         card(14, 62, 82, L"CPU 封装", cpu, snapshot_.packageTemperature > 0 ? static_cast<float>(snapshot_.packageTemperature / 100.0) : 0);
         card(104, 62, 82, L"GPU", gpu, !snapshot_.gpus.empty() ? static_cast<float>(snapshot_.gpus[0].temperature / 100.0) : 0);
         card(194, 62, 82, L"内存", snapshot_.memoryTotal ? numberText(ratio(snapshot_.memoryUsed, snapshot_.memoryTotal) * 100, L"%") : L"—", ratio(snapshot_.memoryUsed, snapshot_.memoryTotal));
-        card(284, 62, 82, L"存储", snapshot_.diskTotal ? numberText(ratio(snapshot_.diskUsed, snapshot_.diskTotal) * 100, L"%") : L"—", ratio(snapshot_.diskUsed, snapshot_.diskTotal));
+        card(284, 62, 82, L"存储", snapshot_.diskTotal ? storageText(snapshot_.diskUsed) : L"—",
+            ratio(snapshot_.diskUsed, snapshot_.diskTotal), compactFormat_);
 
         const auto sampleSeconds = std::chrono::duration_cast<std::chrono::seconds>(
             snapshot_.sampledAt.time_since_epoch()).count();
