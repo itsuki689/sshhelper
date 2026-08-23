@@ -123,6 +123,34 @@ void drawText(ID2D1HwndRenderTarget* target, IDWriteTextFormat* format, ID2D1Bru
     target->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format, rect, brush,
                       D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 }
+
+void drawGearIcon(ID2D1HwndRenderTarget* target, ID2D1Factory* factory,
+                  ID2D1Brush* foreground, ID2D1Brush* background, D2D1_POINT_2F center) {
+    ID2D1PathGeometry* geometry = nullptr;
+    ID2D1GeometrySink* sink = nullptr;
+    if (FAILED(factory->CreatePathGeometry(&geometry)) || FAILED(geometry->Open(&sink))) {
+        release(sink);
+        release(geometry);
+        return;
+    }
+    constexpr int points = 32;
+    constexpr float pi = 3.14159265f;
+    for (int index = 0; index < points; ++index) {
+        const float angle = -pi / 2.0f + 2.0f * pi * static_cast<float>(index) / points;
+        const int phase = index % 4;
+        const float radius = (phase == 1 || phase == 2) ? 9.5f : 7.1f;
+        const auto point = D2D1::Point2F(center.x + std::cos(angle) * radius,
+            center.y + std::sin(angle) * radius);
+        if (index == 0) sink->BeginFigure(point, D2D1_FIGURE_BEGIN_FILLED);
+        else sink->AddLine(point);
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->Close();
+    target->FillGeometry(geometry, foreground);
+    target->FillEllipse(D2D1::Ellipse(center, 2.8f, 2.8f), background);
+    release(sink);
+    release(geometry);
+}
 }
 
 App::App(HINSTANCE instance) : instance_(instance) {
@@ -446,7 +474,7 @@ void App::paint() {
         drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
         drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
-        drawText(renderTarget_, labelFormat_, accentBrush_, L"设置", D2D1::RectF(286, 14, 342, 40));
+        drawGearIcon(renderTarget_, d2dFactory_, accentBrush_, surfaceBrush_, D2D1::Point2F(314, 27));
         drawText(renderTarget_, titleFormat_, mutedBrush_, L"×", D2D1::RectF(348, 9, 378, 42));
         renderTarget_->DrawLine(D2D1::Point2F(0, 49), D2D1::Point2F(MainWidth, 49), lineBrush_, 1);
     }
