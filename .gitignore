@@ -1,6 +1,9 @@
+build/
 node_modules/
 .npm-cache/
 .pkg-cache/
-dist/
 .env
 npm-debug.log*
+AirSFTP.known_hosts
+dist/*
+!dist/AirSFTP.exe
