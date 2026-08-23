@@ -32,6 +32,9 @@ constexpr int SideHeight = 104;
 constexpr int EdgeThreshold = 20;
 constexpr int CompactSnapThreshold = 36;
 constexpr int RestoreGap = 8;
+constexpr UINT_PTR AnimationTimerId = 1;
+constexpr UINT AnimationFrameMs = 15;
+constexpr ULONGLONG AnimationDurationMs = 180;
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -211,6 +214,12 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     switch (message) {
     case WM_PAINT: paint(); return 0;
     case WM_SIZE: resizeGraphics(); return 0;
+    case WM_TIMER:
+        if (wParam == AnimationTimerId) {
+            tickWindowAnimation();
+            return 0;
+        }
+        break;
     case WM_ENTERSIZEMOVE:
         if (!isCollapsed()) {
             GetWindowRect(window_, &expandedRect_);
@@ -221,6 +230,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         handleEdgeDock();
         return 0;
     case WM_DPICHANGED: {
+        if (animating_) finishWindowAnimation();
         const auto* suggested = reinterpret_cast<const RECT*>(lParam);
         const UINT dpi = HIWORD(wParam);
         const int width = pixels(collapseMode_ == CollapseMode::Side ? SideWidth :
@@ -232,13 +242,13 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         return 0;
     }
     case WM_SETCURSOR:
-        if (isCollapsed()) {
+        if (isCollapsed() || (animating_ && animationTargetMode_ != CollapseMode::Expanded)) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
         break;
     case WM_NCHITTEST: {
-        if (isCollapsed()) return HTCLIENT;
+        if (animating_ || isCollapsed()) return HTCLIENT;
         const auto result = DefWindowProcW(window, message, wParam, lParam);
         if (result == HTCLIENT) {
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -249,6 +259,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         return result;
     }
     case WM_LBUTTONDOWN:
+        if (animating_) return 0;
         if (isCollapsed()) {
             GetCursorPos(&compactPressCursor_);
             GetWindowRect(window_, &compactPressRect_);
@@ -297,12 +308,13 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         }
         break;
     case WM_LBUTTONDBLCLK:
-        if (isCollapsed()) return 0;
+        if (animating_ || isCollapsed()) return 0;
         break;
     case WM_NCLBUTTONDBLCLK:
-        if (wParam == HTCAPTION) toggleCollapsed();
+        if (!animating_ && wParam == HTCAPTION) toggleCollapsed();
         return 0;
     case WM_LBUTTONUP: {
+        if (animating_) return 0;
         if (compactPointerDown_) {
             const bool dragged = compactDragging_;
             compactPointerDown_ = false;
@@ -332,6 +344,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         return 0;
     }
     case WM_DESTROY:
+        KillTimer(window_, AnimationTimerId);
         window_ = nullptr;
         PostQuitMessage(0);
         return 0;
@@ -383,18 +396,35 @@ void App::paint() {
 
     const bool horizontal = collapseMode_ == CollapseMode::Horizontal;
     const bool side = collapseMode_ == CollapseMode::Side;
-    const float layoutWidth = side ? static_cast<float>(SideWidth) :
-        (horizontal ? static_cast<float>(CompactWidth) : static_cast<float>(MainWidth));
-    const float layoutHeight = side ? static_cast<float>(SideHeight) :
-        (horizontal ? static_cast<float>(CompactHeight) : static_cast<float>(MainHeight));
-    const float corner = isCollapsed() ? 18.0f : 14.0f;
+    const UINT dpi = GetDpiForWindow(window_);
+    const float layoutWidth = animating_ ? static_cast<float>(dips(client.right, dpi)) :
+        (side ? static_cast<float>(SideWidth) :
+            (horizontal ? static_cast<float>(CompactWidth) : static_cast<float>(MainWidth)));
+    const float layoutHeight = animating_ ? static_cast<float>(dips(client.bottom, dpi)) :
+        (side ? static_cast<float>(SideHeight) :
+            (horizontal ? static_cast<float>(CompactHeight) : static_cast<float>(MainHeight)));
+    const float startCorner = animationFromMode_ == CollapseMode::Expanded ? 14.0f : 18.0f;
+    const float targetCorner = animationTargetMode_ == CollapseMode::Expanded ? 14.0f : 18.0f;
+    const float corner = animating_ ?
+        startCorner + (targetCorner - startCorner) * animationProgress_ :
+        (isCollapsed() ? 18.0f : 14.0f);
     const auto surface = D2D1::RoundedRect(D2D1::RectF(0, 0, layoutWidth, layoutHeight), corner, corner);
     renderTarget_->FillRoundedRectangle(surface, surfaceBrush_);
     renderTarget_->DrawRoundedRectangle(surface, lineBrush_, 1);
 
+    const bool modeChanging = animating_ && animationFromMode_ != animationTargetMode_;
+    const float contentOpacity = modeChanging ?
+        std::max(0.12f, std::abs(animationProgress_ * 2.0f - 1.0f)) : 1.0f;
+    textBrush_->SetOpacity(contentOpacity);
+    mutedBrush_->SetOpacity(contentOpacity);
+    accentBrush_->SetOpacity(contentOpacity);
+    surfaceBrush_->SetOpacity(contentOpacity);
+    lineBrush_->SetOpacity(contentOpacity);
+
     const D2D1_COLOR_F statusColor = snapshot_.connected ? D2D1::ColorF(0x28A745) : D2D1::ColorF(0x9B9BA1);
     ID2D1SolidColorBrush* statusBrush = nullptr;
     renderTarget_->CreateSolidColorBrush(statusColor, &statusBrush);
+    if (statusBrush) statusBrush->SetOpacity(contentOpacity);
     const std::wstring latency = snapshot_.connected ? numberText(snapshot_.sshLatencyMs) : L"—";
     IDWriteTextFormat* compact = compactFormat_ ? compactFormat_ : labelFormat_;
 
@@ -485,9 +515,97 @@ void App::paint() {
             drawText(renderTarget_, labelFormat_, mutedBrush_, L"双击标题或拖到屏幕边缘收起 · 设置中可传输", D2D1::RectF(18, 246, 362, 274));
         }
     }
+    textBrush_->SetOpacity(1.0f);
+    mutedBrush_->SetOpacity(1.0f);
+    accentBrush_->SetOpacity(1.0f);
+    surfaceBrush_->SetOpacity(1.0f);
+    lineBrush_->SetOpacity(1.0f);
     const HRESULT result = renderTarget_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) discardGraphics();
     EndPaint(window_, &paint);
+}
+
+void App::startWindowAnimation(const RECT& target, CollapseMode targetMode, bool clearExpandedRect) {
+    if (!window_) return;
+    if (animating_) KillTimer(window_, AnimationTimerId);
+
+    GetWindowRect(window_, &animationStartRect_);
+    animationTargetRect_ = target;
+    animationFromMode_ = collapseMode_;
+    animationTargetMode_ = targetMode;
+    animationClearsExpandedRect_ = clearExpandedRect;
+    animationProgress_ = 0.0f;
+
+    BOOL animationsEnabled = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
+    const bool unchanged = animationStartRect_.left == target.left &&
+        animationStartRect_.top == target.top && animationStartRect_.right == target.right &&
+        animationStartRect_.bottom == target.bottom && collapseMode_ == targetMode;
+    if (!animationsEnabled || unchanged) {
+        collapseMode_ = targetMode;
+        SetWindowPos(window_, HWND_TOPMOST, target.left, target.top,
+            target.right - target.left, target.bottom - target.top,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (clearExpandedRect) hasExpandedRect_ = false;
+        animationFromMode_ = targetMode;
+        animationProgress_ = 1.0f;
+        animating_ = false;
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
+    animating_ = true;
+    animationStartTime_ = GetTickCount64();
+    if (!SetTimer(window_, AnimationTimerId, AnimationFrameMs, nullptr)) {
+        finishWindowAnimation();
+        return;
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::tickWindowAnimation() {
+    if (!animating_) return;
+    const ULONGLONG elapsed = GetTickCount64() - animationStartTime_;
+    if (elapsed >= AnimationDurationMs) {
+        finishWindowAnimation();
+        return;
+    }
+
+    const float raw = std::clamp(static_cast<float>(elapsed) /
+        static_cast<float>(AnimationDurationMs), 0.0f, 1.0f);
+    animationProgress_ = raw;
+    const float eased = raw * raw * (3.0f - 2.0f * raw);
+    const auto interpolate = [eased](LONG start, LONG end) {
+        return static_cast<int>(std::lround(static_cast<float>(start) +
+            static_cast<float>(end - start) * eased));
+    };
+    if (animationFromMode_ != animationTargetMode_) {
+        const CollapseMode displayMode = raw < 0.5f ? animationFromMode_ : animationTargetMode_;
+        if (collapseMode_ != displayMode) collapseMode_ = displayMode;
+    }
+
+    const int left = interpolate(animationStartRect_.left, animationTargetRect_.left);
+    const int top = interpolate(animationStartRect_.top, animationTargetRect_.top);
+    const int right = interpolate(animationStartRect_.right, animationTargetRect_.right);
+    const int bottom = interpolate(animationStartRect_.bottom, animationTargetRect_.bottom);
+    SetWindowPos(window_, HWND_TOPMOST, left, top, std::max(1, right - left),
+        std::max(1, bottom - top), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::finishWindowAnimation() {
+    if (!animating_) return;
+    KillTimer(window_, AnimationTimerId);
+    animating_ = false;
+    animationProgress_ = 1.0f;
+    collapseMode_ = animationTargetMode_;
+    SetWindowPos(window_, HWND_TOPMOST, animationTargetRect_.left, animationTargetRect_.top,
+        animationTargetRect_.right - animationTargetRect_.left,
+        animationTargetRect_.bottom - animationTargetRect_.top,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (animationClearsExpandedRect_) hasExpandedRect_ = false;
+    animationFromMode_ = collapseMode_;
+    InvalidateRect(window_, nullptr, FALSE);
 }
 
 void App::toggleCollapsed() {
@@ -496,7 +614,7 @@ void App::toggleCollapsed() {
 }
 
 void App::collapseHorizontal(bool dockToTop, HMONITOR targetMonitor) {
-    if (isCollapsed()) return;
+    if (isCollapsed() || animating_) return;
     RECT current{}; GetWindowRect(window_, &current);
     if (!dockToTop || !hasExpandedRect_) {
         expandedRect_ = current;
@@ -514,13 +632,12 @@ void App::collapseHorizontal(bool dockToTop, HMONITOR targetMonitor) {
         static_cast<int>(monitor.rcWork.right) - width);
     const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top),
         static_cast<int>(monitor.rcWork.bottom) - height);
-    collapseMode_ = CollapseMode::Horizontal;
-    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(window_, nullptr, FALSE);
+    startWindowAnimation(RECT{x, y, x + width, y + height},
+        CollapseMode::Horizontal, false);
 }
 
 void App::collapseSide(bool left, HMONITOR targetMonitor) {
-    if (isCollapsed()) return;
+    if (isCollapsed() || animating_) return;
     RECT current{}; GetWindowRect(window_, &current);
     if (!hasExpandedRect_) {
         expandedRect_ = current;
@@ -537,13 +654,12 @@ void App::collapseSide(bool left, HMONITOR targetMonitor) {
     const int desiredY = current.top + ((current.bottom - current.top) - height) / 2;
     const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top),
         static_cast<int>(monitor.rcWork.bottom) - height);
-    collapseMode_ = CollapseMode::Side;
-    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(window_, nullptr, FALSE);
+    startWindowAnimation(RECT{x, y, x + width, y + height},
+        CollapseMode::Side, false);
 }
 
 void App::snapCompactAfterDrag() {
-    if (!isCollapsed()) return;
+    if (!isCollapsed() || animating_) return;
 
     RECT current{};
     GetWindowRect(window_, &current);
@@ -567,12 +683,12 @@ void App::snapCompactAfterDrag() {
     int height = pixels(CompactHeight, dpi);
     int desiredX = centerX - width / 2;
     int desiredY = centerY - height / 2;
-    collapseMode_ = CollapseMode::Horizontal;
+    CollapseMode targetMode = CollapseMode::Horizontal;
 
     if (nearest <= threshold && topDistance == nearest) {
         desiredY = monitor.rcWork.top;
     } else if (nearest <= threshold) {
-        collapseMode_ = CollapseMode::Side;
+        targetMode = CollapseMode::Side;
         width = pixels(SideWidth, dpi);
         height = pixels(SideHeight, dpi);
         desiredX = leftDistance == nearest ? static_cast<int>(monitor.rcWork.left) :
@@ -586,15 +702,12 @@ void App::snapCompactAfterDrag() {
         static_cast<int>(monitor.rcWork.bottom) - height);
     const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), maxX);
     const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), maxY);
-    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    updateRestoreAnchor(targetMonitor);
-    InvalidateRect(window_, nullptr, FALSE);
+    const RECT target{x, y, x + width, y + height};
+    updateRestoreAnchor(targetMonitor, target, targetMode);
+    startWindowAnimation(target, targetMode, false);
 }
 
-void App::updateRestoreAnchor(HMONITOR targetMonitor) {
-    RECT compact{};
-    GetWindowRect(window_, &compact);
+void App::updateRestoreAnchor(HMONITOR targetMonitor, const RECT& compact, CollapseMode mode) {
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(targetMonitor, &monitor);
     const UINT dpi = GetDpiForWindow(window_);
@@ -606,7 +719,7 @@ void App::updateRestoreAnchor(HMONITOR targetMonitor) {
 
     int desiredX = centerX - width / 2;
     int desiredY = compact.bottom + gap;
-    if (collapseMode_ == CollapseMode::Side) {
+    if (mode == CollapseMode::Side) {
         const bool onLeft = std::abs(compact.left - static_cast<int>(monitor.rcWork.left)) <=
             std::abs(compact.right - static_cast<int>(monitor.rcWork.right));
         desiredX = onLeft ? compact.right + gap : compact.left - gap - width;
@@ -626,7 +739,7 @@ void App::updateRestoreAnchor(HMONITOR targetMonitor) {
 }
 
 void App::restoreExpanded() {
-    if (!isCollapsed()) return;
+    if (!isCollapsed() || animating_) return;
     RECT target = expandedRect_;
     if (!hasExpandedRect_) {
         GetWindowRect(window_, &target);
@@ -634,15 +747,11 @@ void App::restoreExpanded() {
         target.right = target.left + pixels(MainWidth, dpi);
         target.bottom = target.top + pixels(MainHeight, dpi);
     }
-    collapseMode_ = CollapseMode::Expanded;
-    SetWindowPos(window_, HWND_TOPMOST, target.left, target.top, target.right - target.left,
-        target.bottom - target.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    hasExpandedRect_ = false;
-    InvalidateRect(window_, nullptr, FALSE);
+    startWindowAnimation(target, CollapseMode::Expanded, true);
 }
 
 void App::handleEdgeDock() {
-    if (isCollapsed()) return;
+    if (isCollapsed() || animating_) return;
     RECT rect{}; GetWindowRect(window_, &rect);
     POINT cursor{};
     const bool hasCursor = GetCursorPos(&cursor);
