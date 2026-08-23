@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>AirSFTP · SSH 文件传输</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="toolbar">
+      <div class="brand" aria-label="AirSFTP">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 18.5h10a4 4 0 0 0 .4-8 6.1 6.1 0 0 0-11.7-1.7A4.9 4.9 0 0 0 7.5 18.5Z"/></svg>
+        <span>AirSFTP</span>
+      </div>
+
+      <button class="connection-summary" id="connectionSummary" type="button" aria-label="编辑连接">
+        <span class="connection-state"><i></i><span id="stateLabel">未配置</span></span>
+        <span class="connection-address" id="addressLabel">点击以配置服务器</span>
+      </button>
+
+      <button class="primary-button" id="connectButton" type="button">配置</button>
+    </header>
+
+    <section class="workspace" aria-label="文件传输工作区">
+      <section class="file-pane" aria-labelledby="localTitle">
+        <div class="path-row">
+          <button class="path-button" type="button" aria-label="本地路径">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 10 8.5-7 8.5 7v10.5h-6v-6h-5v6h-5Z"/></svg>
+            <span id="localTitle">本地 · ~/Downloads</span>
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+          </button>
+          <button class="icon-button refresh" type="button" aria-label="刷新本地文件">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 8A7 7 0 0 1 18.7 7M5.3 17A7 7 0 0 0 17.9 16"/></svg>
+          </button>
+        </div>
+        <div class="list-heading"><span>名称</span><span>大小</span></div>
+        <div class="file-list" data-side="local">
+          <button class="file-row selected" type="button" data-name="build.zip" data-type="archive">
+            <span class="file-name"><span class="file-icon archive">ZIP</span><span>build.zip</span></span><span>42.8 MB</span>
+          </button>
+          <button class="file-row" type="button" data-name="release-notes.md" data-type="document">
+            <span class="file-name"><span class="file-icon document"><i></i></span><span>release-notes.md</span></span><span>12 KB</span>
+          </button>
+          <button class="file-row" type="button" data-name="assets" data-type="folder">
+            <span class="file-name"><span class="file-icon folder"></span><span>assets</span></span><span>—</span>
+          </button>
+          <button class="file-row" type="button" data-name="backup.sql" data-type="database">
+            <span class="file-name"><span class="file-icon database"></span><span>backup.sql</span></span><span>8.4 MB</span>
+          </button>
+        </div>
+      </section>
+
+      <button class="transfer-button" id="transferButton" type="button" aria-label="将所选文件传输至服务器">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h13m-4-4 4 4-4 4M19 16H6m4 4-4-4 4-4"/></svg>
+      </button>
+
+      <section class="file-pane" aria-labelledby="remoteTitle">
+        <div class="path-row">
+          <button class="path-button" type="button" aria-label="远程路径">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v7H5Zm0 10h14v7H5ZM8 7h.01M8 17h.01"/></svg>
+            <span id="remoteTitle">ubuntu@prod · /var/www/app</span>
+            <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+          </button>
+          <button class="icon-button refresh" type="button" aria-label="刷新远程文件">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 8A7 7 0 0 1 18.7 7M5.3 17A7 7 0 0 0 17.9 16"/></svg>
+          </button>
+        </div>
+        <div class="list-heading"><span>名称</span><span>大小</span></div>
+        <div class="file-list" data-side="remote">
+          <button class="file-row" type="button" data-name="current" data-type="folder">
+            <span class="file-name"><span class="file-icon folder"></span><span>current</span></span><span>—</span>
+          </button>
+          <button class="file-row" type="button" data-name="shared" data-type="folder">
+            <span class="file-name"><span class="file-icon folder"></span><span>shared</span></span><span>—</span>
+          </button>
+          <button class="file-row" type="button" data-name="logs" data-type="folder">
+            <span class="file-name"><span class="file-icon folder"></span><span>logs</span></span><span>—</span>
+          </button>
+          <button class="file-row" type="button" data-name="README.md" data-type="document">
+            <span class="file-name"><span class="file-icon document"><i></i></span><span>README.md</span></span><span>4 KB</span>
+          </button>
+        </div>
+      </section>
+    </section>
+
+    <section class="transfer-shelf is-hidden" id="transferShelf" aria-live="polite">
+      <span class="file-icon archive">ZIP</span>
+      <div class="transfer-copy">
+        <strong id="transferName">build.zip</strong>
+        <span id="transferDetail">等待传输</span>
+      </div>
+      <div class="progress-track"><i id="progressBar" style="width:0"></i></div>
+      <strong class="progress-value" id="progressValue">0%</strong>
+      <span class="speed" id="speedValue">0 B/s</span>
+      <button class="cancel-button" id="cancelButton" type="button" aria-label="取消传输">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+      </button>
+    </section>
+
+    <footer class="statusbar">
+      <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11V8a5 5 0 0 1 10 0v3M5 11h14v10H5Z"/></svg>SFTP · 已加密</span>
+      <span id="footerStatus">等待配置</span>
+    </footer>
+  </main>
+
+  <dialog class="connection-dialog" id="connectionDialog">
+    <form method="dialog" id="connectionForm">
+      <div class="dialog-heading">
+        <div><h2>连接服务器</h2><p>通过安全的 SSH 通道访问文件。</p></div>
+        <button class="icon-button" value="cancel" formnovalidate aria-label="关闭">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+        </button>
+      </div>
+      <label>主机<input name="host" value="prod" autocomplete="url" required></label>
+      <div class="form-grid">
+        <label>用户名<input name="user" value="ubuntu" autocomplete="username" required></label>
+        <label>端口<input name="port" value="22" inputmode="numeric" required></label>
+      </div>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <label>本地文件路径<input name="localPath" placeholder="D:\build\app.zip" autocomplete="off" required></label>
+      <label>远程文件路径<input name="remotePath" placeholder="/var/www/app.zip" autocomplete="off" required></label>
+      <button class="dialog-submit" value="connect" type="submit">连接</button>
+      <small>凭据仅保存在当前会话中</small>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
