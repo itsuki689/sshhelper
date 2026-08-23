@@ -36,6 +36,16 @@ bool isGpuChip(const std::string& chip) {
            value.find("i915") != std::string::npos;
 }
 
+bool isCpuChip(const std::string& chip) {
+    const auto value = lower(chip);
+    return value.find("coretemp") != std::string::npos ||
+           value.find("k10temp") != std::string::npos ||
+           value.find("zenpower") != std::string::npos ||
+           value.find("cpu_thermal") != std::string::npos ||
+           value.find("soc_thermal") != std::string::npos ||
+           value.find("acpitz") != std::string::npos;
+}
+
 std::uint64_t u64(const std::string& value) {
     try { return std::stoull(value); } catch (...) { return 0; }
 }
@@ -52,8 +62,11 @@ printf 'AIR|2\n'
 
 if command -v sensors >/dev/null 2>&1; then
   sensors -u 2>/dev/null | awk '
-    /^[^[:space:]]/ { if ($0 !~ /^Adapter:/) chip=$0; next }
-    /^  [^ ].*:$/ { label=$0; sub(/^[[:space:]]+/, "", label); sub(/:$/, "", label); next }
+    /^Adapter:/ { next }
+    /^[[:space:]]*[^[:space:]].*:[[:space:]]*$/ {
+      label=$0; sub(/^[[:space:]]+/, "", label); sub(/:[[:space:]]*$/, "", label); next
+    }
+    /^[^[:space:]]/ { chip=$0; label=""; next }
     /temp[0-9]+_input:/ { print "TEMP|" chip "|" label "|" $2 }
     /fan[0-9]+_input:/  { print "FAN|" chip "|" label "|" $2 }
   '
@@ -117,14 +130,17 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
             }
             if (labelLower.find("package") != std::string::npos ||
                 labelLower == "tctl" || labelLower == "tdie" || labelLower == "die") {
-                if (snapshot.packageTemperature < 0.0 || labelLower.find("package") != std::string::npos)
-                    snapshot.packageTemperature = value;
+                snapshot.packageTemperature = value;
             } else if (labelLower.find("core") != std::string::npos ||
                        labelLower.find("ccd") != std::string::npos) {
                 snapshot.coreTemperatures.push_back({parts[2], value});
+                if (snapshot.packageTemperature < 0.0) snapshot.packageTemperature = value;
+            } else if (isCpuChip(parts[1]) && snapshot.packageTemperature < 0.0) {
+                snapshot.packageTemperature = value;
             }
         } else if (parts[0] == "FAN" && parts.size() >= 4) {
             const double value = real(parts[3]);
+            if (value <= 0.0) continue;
             if (isGpuChip(parts[1])) {
                 auto gpu = std::find_if(snapshot.gpus.begin(), snapshot.gpus.end(), [&](const GpuMetrics& item) {
                     return item.name == parts[1];

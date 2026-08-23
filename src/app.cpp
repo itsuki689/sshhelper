@@ -122,6 +122,7 @@ App::App(HINSTANCE instance) : instance_(instance) {
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 22.0f, L"zh-cn", &metricFormat_);
         writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"zh-cn", &labelFormat_);
+        if (labelFormat_) labelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
     uiFont_ = CreateFontW(-pixels(15, GetDpiForSystem()), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
@@ -285,7 +286,7 @@ void App::paint() {
     const D2D1_COLOR_F statusColor = snapshot_.connected ? D2D1::ColorF(0x28A745) : D2D1::ColorF(0x9B9BA1);
     ID2D1SolidColorBrush* statusBrush = nullptr;
     renderTarget_->CreateSolidColorBrush(statusColor, &statusBrush);
-    renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 25), 4, 4), statusBrush);
+    renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
     release(statusBrush);
     drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
     drawText(renderTarget_, labelFormat_, accentBrush_, L"设置", D2D1::RectF(286, 14, 342, 40));
@@ -339,9 +340,9 @@ void App::paint() {
         }
         if (!snapshot_.gpus.empty()) {
             const auto& gpuFan = snapshot_.gpus[0];
-            if (gpuFan.fanRpm >= 0)
+            if (gpuFan.fanRpm > 0)
                 fan += L"    GPU " + numberText(gpuFan.fanRpm, L" RPM");
-            else if (gpuFan.fanPercent >= 0)
+            else if (gpuFan.fanPercent > 0)
                 fan += L"    GPU " + numberText(gpuFan.fanPercent, L"%");
         }
         drawText(renderTarget_, labelFormat_, mutedBrush_, fan, D2D1::RectF(18, 164, 260, 186));
