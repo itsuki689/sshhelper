@@ -30,6 +30,8 @@ constexpr int CompactHeight = 36;
 constexpr int SideWidth = 44;
 constexpr int SideHeight = 104;
 constexpr int EdgeThreshold = 20;
+constexpr int CompactSnapThreshold = 36;
+constexpr int RestoreGap = 8;
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -218,6 +220,23 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     case WM_EXITSIZEMOVE:
         handleEdgeDock();
         return 0;
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        const UINT dpi = HIWORD(wParam);
+        const int width = pixels(collapseMode_ == CollapseMode::Side ? SideWidth :
+            (collapseMode_ == CollapseMode::Horizontal ? CompactWidth : MainWidth), dpi);
+        const int height = pixels(collapseMode_ == CollapseMode::Side ? SideHeight :
+            (collapseMode_ == CollapseMode::Horizontal ? CompactHeight : MainHeight), dpi);
+        SetWindowPos(window_, nullptr, suggested->left, suggested->top, width, height,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (isCollapsed()) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
     case WM_NCHITTEST: {
         if (isCollapsed()) return HTCLIENT;
         const auto result = DefWindowProcW(window, message, wParam, lParam);
@@ -229,17 +248,71 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         }
         return result;
     }
+    case WM_LBUTTONDOWN:
+        if (isCollapsed()) {
+            GetCursorPos(&compactPressCursor_);
+            GetWindowRect(window_, &compactPressRect_);
+            compactPointerDown_ = true;
+            compactDragging_ = false;
+            SetCapture(window_);
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE:
+        if (compactPointerDown_) {
+            if (!(wParam & MK_LBUTTON)) return 0;
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            const int dx = cursor.x - compactPressCursor_.x;
+            const int dy = cursor.y - compactPressCursor_.y;
+            if (!compactDragging_) {
+                const int dragX = std::max(2, GetSystemMetrics(SM_CXDRAG));
+                const int dragY = std::max(2, GetSystemMetrics(SM_CYDRAG));
+                if (std::abs(dx) < dragX && std::abs(dy) < dragY) return 0;
+                compactDragging_ = true;
+            }
+            RECT current{};
+            GetWindowRect(window_, &current);
+            const int width = current.right - current.left;
+            const int height = current.bottom - current.top;
+            MONITORINFO monitor{sizeof(monitor)};
+            GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
+            const int maxX = std::max(static_cast<int>(monitor.rcWork.left),
+                static_cast<int>(monitor.rcWork.right) - width);
+            const int maxY = std::max(static_cast<int>(monitor.rcWork.top),
+                static_cast<int>(monitor.rcWork.bottom) - height);
+            const int x = std::clamp(static_cast<int>(compactPressRect_.left) + dx,
+                static_cast<int>(monitor.rcWork.left), maxX);
+            const int y = std::clamp(static_cast<int>(compactPressRect_.top) + dy,
+                static_cast<int>(monitor.rcWork.top), maxY);
+            SetWindowPos(window_, HWND_TOPMOST, x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        if (compactPointerDown_) {
+            compactPointerDown_ = false;
+            compactDragging_ = false;
+        }
+        break;
     case WM_LBUTTONDBLCLK:
-        if (isCollapsed()) restoreExpanded();
-        return 0;
+        if (isCollapsed()) return 0;
+        break;
     case WM_NCLBUTTONDBLCLK:
         if (wParam == HTCAPTION) toggleCollapsed();
         return 0;
     case WM_LBUTTONUP: {
-        if (isCollapsed()) {
-            restoreExpanded();
+        if (compactPointerDown_) {
+            const bool dragged = compactDragging_;
+            compactPointerDown_ = false;
+            compactDragging_ = false;
+            if (GetCapture() == window_) ReleaseCapture();
+            if (dragged) snapCompactAfterDrag();
+            else restoreExpanded();
             return 0;
         }
+        if (isCollapsed()) return 0;
         const UINT dpi = GetDpiForWindow(window);
         const int x = dips(GET_X_LPARAM(lParam), dpi), y = dips(GET_Y_LPARAM(lParam), dpi);
         if (y < 48 && x > MainWidth - 38) DestroyWindow(window_);
@@ -469,6 +542,89 @@ void App::collapseSide(bool left, HMONITOR targetMonitor) {
     InvalidateRect(window_, nullptr, FALSE);
 }
 
+void App::snapCompactAfterDrag() {
+    if (!isCollapsed()) return;
+
+    RECT current{};
+    GetWindowRect(window_, &current);
+    POINT cursor{};
+    const bool hasCursor = GetCursorPos(&cursor);
+    HMONITOR targetMonitor = hasCursor
+        ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(targetMonitor, &monitor);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int threshold = pixels(CompactSnapThreshold, dpi);
+    const int topDistance = std::abs(current.top - static_cast<int>(monitor.rcWork.top));
+    const int leftDistance = std::abs(current.left - static_cast<int>(monitor.rcWork.left));
+    const int rightDistance = std::abs(current.right - static_cast<int>(monitor.rcWork.right));
+    const int nearest = std::min({topDistance, leftDistance, rightDistance});
+    const int centerX = current.left + (current.right - current.left) / 2;
+    const int centerY = current.top + (current.bottom - current.top) / 2;
+
+    int width = pixels(CompactWidth, dpi);
+    int height = pixels(CompactHeight, dpi);
+    int desiredX = centerX - width / 2;
+    int desiredY = centerY - height / 2;
+    collapseMode_ = CollapseMode::Horizontal;
+
+    if (nearest <= threshold && topDistance == nearest) {
+        desiredY = monitor.rcWork.top;
+    } else if (nearest <= threshold) {
+        collapseMode_ = CollapseMode::Side;
+        width = pixels(SideWidth, dpi);
+        height = pixels(SideHeight, dpi);
+        desiredX = leftDistance == nearest ? static_cast<int>(monitor.rcWork.left) :
+            static_cast<int>(monitor.rcWork.right) - width;
+        desiredY = centerY - height / 2;
+    }
+
+    const int maxX = std::max(static_cast<int>(monitor.rcWork.left),
+        static_cast<int>(monitor.rcWork.right) - width);
+    const int maxY = std::max(static_cast<int>(monitor.rcWork.top),
+        static_cast<int>(monitor.rcWork.bottom) - height);
+    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), maxX);
+    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), maxY);
+    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    updateRestoreAnchor(targetMonitor);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::updateRestoreAnchor(HMONITOR targetMonitor) {
+    RECT compact{};
+    GetWindowRect(window_, &compact);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(targetMonitor, &monitor);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int width = pixels(MainWidth, dpi);
+    const int height = pixels(MainHeight, dpi);
+    const int gap = pixels(RestoreGap, dpi);
+    const int centerX = compact.left + (compact.right - compact.left) / 2;
+    const int centerY = compact.top + (compact.bottom - compact.top) / 2;
+
+    int desiredX = centerX - width / 2;
+    int desiredY = compact.bottom + gap;
+    if (collapseMode_ == CollapseMode::Side) {
+        const bool onLeft = std::abs(compact.left - static_cast<int>(monitor.rcWork.left)) <=
+            std::abs(compact.right - static_cast<int>(monitor.rcWork.right));
+        desiredX = onLeft ? compact.right + gap : compact.left - gap - width;
+        desiredY = centerY - height / 2;
+    } else if (desiredY + height > monitor.rcWork.bottom) {
+        desiredY = compact.top - gap - height;
+    }
+
+    const int maxX = std::max(static_cast<int>(monitor.rcWork.left),
+        static_cast<int>(monitor.rcWork.right) - width);
+    const int maxY = std::max(static_cast<int>(monitor.rcWork.top),
+        static_cast<int>(monitor.rcWork.bottom) - height);
+    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), maxX);
+    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), maxY);
+    expandedRect_ = RECT{x, y, x + width, y + height};
+    hasExpandedRect_ = true;
+}
+
 void App::restoreExpanded() {
     if (!isCollapsed()) return;
     RECT target = expandedRect_;
@@ -507,6 +663,20 @@ void App::handleEdgeDock() {
         : std::abs(rect.right - static_cast<int>(monitor.rcWork.right));
     const int nearest = std::min({topDistance, leftDistance, rightDistance});
     if (nearest > threshold) {
+        const int width = rect.right - rect.left;
+        const int height = rect.bottom - rect.top;
+        const int maxX = std::max(static_cast<int>(monitor.rcWork.left),
+            static_cast<int>(monitor.rcWork.right) - width);
+        const int maxY = std::max(static_cast<int>(monitor.rcWork.top),
+            static_cast<int>(monitor.rcWork.bottom) - height);
+        const int x = std::clamp(static_cast<int>(rect.left),
+            static_cast<int>(monitor.rcWork.left), maxX);
+        const int y = std::clamp(static_cast<int>(rect.top),
+            static_cast<int>(monitor.rcWork.top), maxY);
+        if (x != rect.left || y != rect.top) {
+            SetWindowPos(window_, HWND_TOPMOST, x, y, 0, 0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
         hasExpandedRect_ = false;
         return;
     }

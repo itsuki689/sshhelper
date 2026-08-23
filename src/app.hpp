@@ -37,6 +37,8 @@ private:
     void toggleCollapsed();
     void collapseHorizontal(bool dockToTop, HMONITOR monitor = nullptr);
     void collapseSide(bool left, HMONITOR monitor = nullptr);
+    void snapCompactAfterDrag();
+    void updateRestoreAnchor(HMONITOR monitor);
     void restoreExpanded();
     void handleEdgeDock();
     bool isCollapsed() const { return collapseMode_ != CollapseMode::Expanded; }
@@ -57,6 +59,10 @@ private:
     CollapseMode collapseMode_ = CollapseMode::Expanded;
     RECT expandedRect_{};
     bool hasExpandedRect_ = false;
+    bool compactPointerDown_ = false;
+    bool compactDragging_ = false;
+    POINT compactPressCursor_{};
+    RECT compactPressRect_{};
 
     ID2D1Factory* d2dFactory_ = nullptr;
     IDWriteFactory* writeFactory_ = nullptr;
