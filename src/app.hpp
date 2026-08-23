@@ -35,8 +35,8 @@ private:
     bool ensureGraphics();
     void resizeGraphics();
     void toggleCollapsed();
-    void collapseHorizontal(bool dockToTop);
-    void collapseSide(bool left);
+    void collapseHorizontal(bool dockToTop, HMONITOR monitor = nullptr);
+    void collapseSide(bool left, HMONITOR monitor = nullptr);
     void restoreExpanded();
     void handleEdgeDock();
     bool isCollapsed() const { return collapseMode_ != CollapseMode::Expanded; }

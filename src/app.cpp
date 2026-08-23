@@ -25,11 +25,11 @@ constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
 constexpr int MainWidth = 380;
 constexpr int MainHeight = 300;
-constexpr int CompactWidth = 208;
-constexpr int CompactHeight = 42;
+constexpr int CompactWidth = 176;
+constexpr int CompactHeight = 36;
 constexpr int SideWidth = 44;
 constexpr int SideHeight = 104;
-constexpr int EdgeThreshold = 12;
+constexpr int EdgeThreshold = 20;
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -329,9 +329,9 @@ void App::paint() {
         drawText(renderTarget_, compact, textBrush_, latency, D2D1::RectF(2, 42, 42, 68));
         drawText(renderTarget_, compact, mutedBrush_, L"ms", D2D1::RectF(2, 65, 42, 89));
     } else if (horizontal) {
-        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(12, 7, 98, 35));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(109, 21), 4, 4), statusBrush);
-        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(120, 5, 201, 37));
+        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(10, 4, 88, 32));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(97, 18), 4, 4), statusBrush);
+        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(106, 2, 171, 34));
     } else {
         drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
@@ -421,7 +421,7 @@ void App::toggleCollapsed() {
     else collapseHorizontal(false);
 }
 
-void App::collapseHorizontal(bool dockToTop) {
+void App::collapseHorizontal(bool dockToTop, HMONITOR targetMonitor) {
     if (isCollapsed()) return;
     RECT current{}; GetWindowRect(window_, &current);
     if (!dockToTop || !hasExpandedRect_) {
@@ -429,7 +429,8 @@ void App::collapseHorizontal(bool dockToTop) {
         hasExpandedRect_ = true;
     }
     MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    if (!targetMonitor) targetMonitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(targetMonitor, &monitor);
     const UINT dpi = GetDpiForWindow(window_);
     const int width = pixels(CompactWidth, dpi);
     const int height = pixels(CompactHeight, dpi);
@@ -444,7 +445,7 @@ void App::collapseHorizontal(bool dockToTop) {
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void App::collapseSide(bool left) {
+void App::collapseSide(bool left, HMONITOR targetMonitor) {
     if (isCollapsed()) return;
     RECT current{}; GetWindowRect(window_, &current);
     if (!hasExpandedRect_) {
@@ -452,7 +453,8 @@ void App::collapseSide(bool left) {
         hasExpandedRect_ = true;
     }
     MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    if (!targetMonitor) targetMonitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    GetMonitorInfoW(targetMonitor, &monitor);
     const UINT dpi = GetDpiForWindow(window_);
     const int width = pixels(SideWidth, dpi);
     const int height = pixels(SideHeight, dpi);
@@ -485,20 +487,31 @@ void App::restoreExpanded() {
 void App::handleEdgeDock() {
     if (isCollapsed()) return;
     RECT rect{}; GetWindowRect(window_, &rect);
+    POINT cursor{};
+    const bool hasCursor = GetCursorPos(&cursor);
+    HMONITOR targetMonitor = hasCursor
+        ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
     MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    GetMonitorInfoW(targetMonitor, &monitor);
     const int threshold = pixels(EdgeThreshold, GetDpiForWindow(window_));
-    const int topDistance = std::abs(rect.top - static_cast<int>(monitor.rcWork.top));
-    const int leftDistance = std::abs(rect.left - static_cast<int>(monitor.rcWork.left));
-    const int rightDistance = std::abs(rect.right - static_cast<int>(monitor.rcWork.right));
+    const int topDistance = hasCursor
+        ? std::abs(cursor.y - static_cast<int>(monitor.rcWork.top))
+        : std::abs(rect.top - static_cast<int>(monitor.rcWork.top));
+    const int leftDistance = hasCursor
+        ? std::abs(cursor.x - static_cast<int>(monitor.rcWork.left))
+        : std::abs(rect.left - static_cast<int>(monitor.rcWork.left));
+    const int rightDistance = hasCursor
+        ? std::abs(cursor.x - static_cast<int>(monitor.rcWork.right))
+        : std::abs(rect.right - static_cast<int>(monitor.rcWork.right));
     const int nearest = std::min({topDistance, leftDistance, rightDistance});
     if (nearest > threshold) {
         hasExpandedRect_ = false;
         return;
     }
-    if (leftDistance == nearest) collapseSide(true);
-    else if (rightDistance == nearest) collapseSide(false);
-    else collapseHorizontal(true);
+    if (leftDistance == nearest) collapseSide(true, targetMonitor);
+    else if (rightDistance == nearest) collapseSide(false, targetMonitor);
+    else collapseHorizontal(true, targetMonitor);
 }
 
 void App::createSettingsWindow() {
