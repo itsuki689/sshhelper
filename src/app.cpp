@@ -1,6 +1,7 @@
 #include "app.hpp"
 
 #include "credential_store.hpp"
+#include "resource.h"
 #include "ssh_client.hpp"
 #include "telemetry.hpp"
 
@@ -213,6 +214,9 @@ bool App::registerClasses() {
     mainClass.lpfnWndProc = mainWindowProc;
     mainClass.hInstance = instance_;
     mainClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    mainClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_AIRSFTP));
+    mainClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_AIRSFTP),
+        IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
     mainClass.hbrBackground = nullptr;
     mainClass.lpszClassName = MainClass;
     if (!RegisterClassExW(&mainClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
@@ -222,6 +226,8 @@ bool App::registerClasses() {
     settingsClass.lpfnWndProc = settingsWindowProc;
     settingsClass.hInstance = instance_;
     settingsClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    settingsClass.hIcon = mainClass.hIcon;
+    settingsClass.hIconSm = mainClass.hIconSm;
     settingsClass.hbrBackground = nullptr;
     settingsClass.lpszClassName = SettingsClass;
     return RegisterClassExW(&settingsClass) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;

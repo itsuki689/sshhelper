@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AirSFTPMonitor VERSION 2.0.0 LANGUAGES C CXX)
+project(AirSFTPMonitor VERSION 2.0.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,9 @@ target_compile_definitions(airsftp_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_M
 add_executable(AirSFTP WIN32
   src/main.cpp
   src/app.cpp
+  resources/AirSFTP.rc
 )
+target_include_directories(AirSFTP PRIVATE resources)
 target_link_libraries(AirSFTP PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32)
 
 if(MINGW)
