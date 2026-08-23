@@ -24,7 +24,7 @@ constexpr wchar_t SettingsClass[] = L"AirSFTPSettingsWindow";
 constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
 constexpr int MainWidth = 380;
-constexpr int MainHeight = 300;
+constexpr int MainHeight = 270;
 constexpr int CompactWidth = 176;
 constexpr int CompactHeight = 36;
 constexpr int SideWidth = 44;
@@ -515,13 +515,14 @@ void App::paint() {
         }
         std::sort(coreTemperatures.begin(), coreTemperatures.end(),
             [](double left, double right) { return left > right; });
+        drawText(renderTarget_, labelFormat_, mutedBrush_, L"Cores", D2D1::RectF(18, 139, 84, 163));
         if (coreTemperatures.empty()) {
-            drawText(renderTarget_, compact, mutedBrush_, L"—", D2D1::RectF(18, 139, 362, 163));
+            drawText(renderTarget_, compact, mutedBrush_, L"—", D2D1::RectF(96, 139, 182, 163));
         } else {
             ID2D1Brush* rankBrushes[] = {rankRedBrush_, rankYellowBrush_, rankGreenBrush_};
             const std::size_t count = std::min<std::size_t>(3, coreTemperatures.size());
             constexpr float slotWidth = 86.0f;
-            const float startX = (MainWidth - slotWidth * static_cast<float>(count)) / 2.0f;
+            constexpr float startX = 96.0f;
             for (std::size_t index = 0; index < count; ++index) {
                 const float x = startX + slotWidth * static_cast<float>(index);
                 drawText(renderTarget_, compact, rankBrushes[index],
@@ -553,10 +554,10 @@ void App::paint() {
 
         if (transfer_.active || transfer_.completed || transfer_.failed) {
             const float progressValue = ratio(transfer_.transferred, transfer_.total);
-            drawText(renderTarget_, labelFormat_, textBrush_, wide(transfer_.fileName), D2D1::RectF(18, 241, 210, 262));
-            drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? humanBytes(transfer_.bytesPerSecond, true) : wide(transfer_.message), D2D1::RectF(220, 241, 360, 262));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 362, 275), 3, 3), lineBrush_);
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 18 + 344 * progressValue, 275), 3, 3), accentBrush_);
+            drawText(renderTarget_, labelFormat_, textBrush_, wide(transfer_.fileName), D2D1::RectF(18, 236, 210, 253));
+            drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? humanBytes(transfer_.bytesPerSecond, true) : wide(transfer_.message), D2D1::RectF(220, 236, 360, 253));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 362, 263), 3, 3), lineBrush_);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 18 + 344 * progressValue, 263), 3, 3), accentBrush_);
         }
     }
     textBrush_->SetOpacity(1.0f);
