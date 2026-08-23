@@ -802,13 +802,24 @@ void App::updateRestoreAnchor(HMONITOR targetMonitor, const RECT& compact, Colla
 
 void App::restoreExpanded() {
     if (!isCollapsed() || animating_) return;
-    RECT target = expandedRect_;
-    if (!hasExpandedRect_) {
-        GetWindowRect(window_, &target);
-        const UINT dpi = GetDpiForWindow(window_);
-        target.right = target.left + pixels(MainWidth, dpi);
-        target.bottom = target.top + pixels(MainHeight, dpi);
-    }
+    RECT compact{};
+    GetWindowRect(window_, &compact);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int width = pixels(MainWidth, dpi);
+    const int height = pixels(MainHeight, dpi);
+    const int centerX = compact.left + (compact.right - compact.left) / 2;
+    const int centerY = compact.top + (compact.bottom - compact.top) / 2;
+    const int maxX = std::max(static_cast<int>(monitor.rcWork.left),
+        static_cast<int>(monitor.rcWork.right) - width);
+    const int maxY = std::max(static_cast<int>(monitor.rcWork.top),
+        static_cast<int>(monitor.rcWork.bottom) - height);
+    const int x = std::clamp(centerX - width / 2,
+        static_cast<int>(monitor.rcWork.left), maxX);
+    const int y = std::clamp(centerY - height / 2,
+        static_cast<int>(monitor.rcWork.top), maxY);
+    const RECT target{x, y, x + width, y + height};
     startWindowAnimation(target, CollapseMode::Expanded, true);
 }
 
