@@ -39,12 +39,12 @@ def main() -> None:
     shifted_shadow.paste(shadow_mask, (0, 18))
     composite_masked(canvas, shadow, shifted_shadow)
 
-    body = vertical_gradient((45, 48, 54, 255), (12, 13, 16, 255))
+    body = vertical_gradient((32, 32, 32, 255), (5, 5, 5, 255))
     composite_masked(canvas, body, body_mask)
 
     rim = Image.new("RGBA", canvas.size)
     rim_draw = ImageDraw.Draw(rim)
-    rim_draw.rounded_rectangle(body_box, radius=214, outline=(142, 148, 158, 210), width=18)
+    rim_draw.rounded_rectangle(body_box, radius=214, outline=(132, 132, 132, 210), width=18)
     rim_draw.rounded_rectangle((90, 90, 934, 934), radius=196, outline=(255, 255, 255, 35), width=5)
     canvas.alpha_composite(rim)
 
@@ -58,20 +58,20 @@ def main() -> None:
     arrow_draw.polygon(down_arrow, fill=255)
 
     arrow_glow_mask = arrows_mask.filter(ImageFilter.GaussianBlur(22))
-    composite_masked(canvas, Image.new("RGBA", canvas.size, (0, 122, 255, 92)), arrow_glow_mask)
-    arrow_fill = vertical_gradient((57, 190, 255, 255), (0, 104, 238, 255))
+    composite_masked(canvas, Image.new("RGBA", canvas.size, (255, 255, 255, 50)), arrow_glow_mask)
+    arrow_fill = vertical_gradient((255, 255, 255, 255), (196, 196, 196, 255))
     composite_masked(canvas, arrow_fill, arrows_mask)
 
     arrow_edges = Image.new("RGBA", canvas.size)
     edge_draw = ImageDraw.Draw(arrow_edges)
-    edge_draw.line(up_arrow + [up_arrow[0]], fill=(142, 226, 255, 210), width=7, joint="curve")
-    edge_draw.line(down_arrow + [down_arrow[0]], fill=(90, 207, 255, 190), width=7, joint="curve")
+    edge_draw.line(up_arrow + [up_arrow[0]], fill=(255, 255, 255, 225), width=7, joint="curve")
+    edge_draw.line(down_arrow + [down_arrow[0]], fill=(234, 234, 234, 205), width=7, joint="curve")
     canvas.alpha_composite(arrow_edges)
 
     terminal = Image.new("RGBA", canvas.size)
     terminal_draw = ImageDraw.Draw(terminal)
-    terminal_draw.line([(486, 485), (520, 519), (486, 553)], fill=(211, 217, 225, 225), width=18, joint="curve")
-    terminal_draw.rounded_rectangle((526, 546, 566, 562), radius=8, fill=(211, 217, 225, 205))
+    terminal_draw.line([(486, 485), (520, 519), (486, 553)], fill=(104, 104, 104, 235), width=18, joint="curve")
+    terminal_draw.rounded_rectangle((526, 546, 566, 562), radius=8, fill=(104, 104, 104, 220))
     canvas.alpha_composite(terminal)
 
     png_path = ROOT / "AirSFTP-icon.png"
