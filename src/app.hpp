@@ -90,6 +90,9 @@ private:
     ID2D1SolidColorBrush* accentBrush_ = nullptr;
     ID2D1SolidColorBrush* surfaceBrush_ = nullptr;
     ID2D1SolidColorBrush* lineBrush_ = nullptr;
+    ID2D1SolidColorBrush* rankRedBrush_ = nullptr;
+    ID2D1SolidColorBrush* rankYellowBrush_ = nullptr;
+    ID2D1SolidColorBrush* rankGreenBrush_ = nullptr;
     IDWriteTextFormat* titleFormat_ = nullptr;
     IDWriteTextFormat* metricFormat_ = nullptr;
     IDWriteTextFormat* labelFormat_ = nullptr;

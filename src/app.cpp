@@ -398,11 +398,15 @@ bool App::ensureGraphics() {
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x087FF5), &accentBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF), &surfaceBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xE4E4E8), &lineBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFF5F57), &rankRedBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFBD2E), &rankYellowBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x28C840), &rankGreenBrush_);
     return true;
 }
 
 void App::discardGraphics() {
     release(textBrush_); release(mutedBrush_); release(accentBrush_); release(surfaceBrush_); release(lineBrush_);
+    release(rankRedBrush_); release(rankYellowBrush_); release(rankGreenBrush_);
     release(renderTarget_);
 }
 
@@ -454,6 +458,9 @@ void App::paint() {
     accentBrush_->SetOpacity(contentOpacity);
     surfaceBrush_->SetOpacity(contentOpacity);
     lineBrush_->SetOpacity(contentOpacity);
+    rankRedBrush_->SetOpacity(contentOpacity);
+    rankYellowBrush_->SetOpacity(contentOpacity);
+    rankGreenBrush_->SetOpacity(contentOpacity);
 
     const D2D1_COLOR_F statusColor = snapshot_.connected ? D2D1::ColorF(0x28A745) : D2D1::ColorF(0x9B9BA1);
     ID2D1SolidColorBrush* statusBrush = nullptr;
@@ -500,23 +507,28 @@ void App::paint() {
 
         const auto sampleSeconds = std::chrono::duration_cast<std::chrono::seconds>(
             snapshot_.sampledAt.time_since_epoch()).count();
-        std::wstring cores = L"核心 ";
-        if (snapshot_.coreTemperatures.empty()) {
-            cores += L"暂无各核传感器";
+        std::vector<double> coreTemperatures;
+        coreTemperatures.reserve(snapshot_.coreTemperatures.size());
+        for (const auto& sensor : snapshot_.coreTemperatures) {
+            if (std::isfinite(sensor.value) && sensor.value >= 0)
+                coreTemperatures.push_back(sensor.value);
+        }
+        std::sort(coreTemperatures.begin(), coreTemperatures.end(),
+            [](double left, double right) { return left > right; });
+        if (coreTemperatures.empty()) {
+            drawText(renderTarget_, compact, mutedBrush_, L"—", D2D1::RectF(18, 139, 362, 163));
         } else {
-            constexpr std::size_t pageSize = 4;
-            const std::size_t count = snapshot_.coreTemperatures.size();
-            const std::size_t pages = (count + pageSize - 1) / pageSize;
-            const std::size_t begin = static_cast<std::size_t>((sampleSeconds / 6) % pages) * pageSize;
-            const std::size_t end = std::min(begin + pageSize, count);
-            if (pages > 1)
-                cores += std::to_wstring(begin + 1) + L"-" + std::to_wstring(end) + L"/" + std::to_wstring(count) + L"  ";
-            for (std::size_t i = begin; i < end; ++i) {
-                if (i != begin) cores += L"  ";
-                cores += wide(snapshot_.coreTemperatures[i].label) + L" " + numberText(snapshot_.coreTemperatures[i].value, L"°");
+            ID2D1Brush* rankBrushes[] = {rankRedBrush_, rankYellowBrush_, rankGreenBrush_};
+            const std::size_t count = std::min<std::size_t>(3, coreTemperatures.size());
+            constexpr float slotWidth = 86.0f;
+            const float startX = (MainWidth - slotWidth * static_cast<float>(count)) / 2.0f;
+            for (std::size_t index = 0; index < count; ++index) {
+                const float x = startX + slotWidth * static_cast<float>(index);
+                drawText(renderTarget_, compact, rankBrushes[index],
+                    numberText(coreTemperatures[index], L"°C"),
+                    D2D1::RectF(x, 139, x + slotWidth, 163));
             }
         }
-        drawText(renderTarget_, labelFormat_, mutedBrush_, cores, D2D1::RectF(18, 140, 362, 162));
 
         std::wstring fan = L"风扇 ";
         if (!snapshot_.fans.empty()) {
@@ -545,8 +557,6 @@ void App::paint() {
             drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? humanBytes(transfer_.bytesPerSecond, true) : wide(transfer_.message), D2D1::RectF(220, 241, 360, 262));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 362, 275), 3, 3), lineBrush_);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 18 + 344 * progressValue, 275), 3, 3), accentBrush_);
-        } else {
-            drawText(renderTarget_, labelFormat_, mutedBrush_, L"双击标题或拖到屏幕边缘收起 · 设置中可传输", D2D1::RectF(18, 246, 362, 274));
         }
     }
     textBrush_->SetOpacity(1.0f);
@@ -554,6 +564,9 @@ void App::paint() {
     accentBrush_->SetOpacity(1.0f);
     surfaceBrush_->SetOpacity(1.0f);
     lineBrush_->SetOpacity(1.0f);
+    rankRedBrush_->SetOpacity(1.0f);
+    rankYellowBrush_->SetOpacity(1.0f);
+    rankGreenBrush_->SetOpacity(1.0f);
     const HRESULT result = renderTarget_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET) discardGraphics();
     EndPaint(window_, &paint);
