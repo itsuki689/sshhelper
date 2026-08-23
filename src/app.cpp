@@ -26,10 +26,10 @@ constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
 constexpr int MainWidth = 380;
 constexpr int MainHeight = 270;
-constexpr int CompactWidth = 176;
-constexpr int CompactHeight = 36;
-constexpr int SideWidth = 44;
-constexpr int SideHeight = 104;
+constexpr int CompactWidth = 100;
+constexpr int CompactHeight = 32;
+constexpr int SideWidth = 36;
+constexpr int SideHeight = 78;
 constexpr int EdgeThreshold = 20;
 constexpr int CompactSnapThreshold = 36;
 constexpr int RestoreGap = 8;
@@ -481,13 +481,12 @@ void App::paint() {
     IDWriteTextFormat* compact = compactFormat_ ? compactFormat_ : labelFormat_;
 
     if (side) {
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(22, 20), 4, 4), statusBrush);
-        drawText(renderTarget_, compact, textBrush_, latency, D2D1::RectF(2, 42, 42, 68));
-        drawText(renderTarget_, compact, mutedBrush_, L"ms", D2D1::RectF(2, 65, 42, 89));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(18, 15), 4, 4), statusBrush);
+        drawText(renderTarget_, compact, textBrush_, latency, D2D1::RectF(2, 30, 34, 53));
+        drawText(renderTarget_, compact, mutedBrush_, L"ms", D2D1::RectF(2, 50, 34, 72));
     } else if (horizontal) {
-        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(10, 4, 88, 32));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(97, 18), 4, 4), statusBrush);
-        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(106, 2, 171, 34));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(14, 16), 4, 4), statusBrush);
+        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(24, 1, 96, 31));
     } else {
         drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
