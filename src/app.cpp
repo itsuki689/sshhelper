@@ -25,7 +25,11 @@ constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
 constexpr int MainWidth = 380;
 constexpr int MainHeight = 300;
-constexpr int CollapsedHeight = 62;
+constexpr int CompactWidth = 208;
+constexpr int CompactHeight = 42;
+constexpr int SideWidth = 44;
+constexpr int SideHeight = 104;
+constexpr int EdgeThreshold = 12;
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -123,6 +127,12 @@ App::App(HINSTANCE instance) : instance_(instance) {
         writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"zh-cn", &labelFormat_);
         if (labelFormat_) labelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"zh-cn", &compactFormat_);
+        if (compactFormat_) {
+            compactFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            compactFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
     }
     uiFont_ = CreateFontW(-pixels(15, GetDpiForSystem()), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
@@ -132,7 +142,7 @@ App::~App() {
     stopTransfer();
     stopMonitor();
     discardGraphics();
-    release(titleFormat_); release(metricFormat_); release(labelFormat_);
+    release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_);
     release(writeFactory_); release(d2dFactory_);
     if (uiFont_) DeleteObject(uiFont_);
 }
@@ -198,7 +208,17 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     switch (message) {
     case WM_PAINT: paint(); return 0;
     case WM_SIZE: resizeGraphics(); return 0;
+    case WM_ENTERSIZEMOVE:
+        if (!isCollapsed()) {
+            GetWindowRect(window_, &expandedRect_);
+            hasExpandedRect_ = true;
+        }
+        return 0;
+    case WM_EXITSIZEMOVE:
+        handleEdgeDock();
+        return 0;
     case WM_NCHITTEST: {
+        if (isCollapsed()) return HTCLIENT;
         const auto result = DefWindowProcW(window, message, wParam, lParam);
         if (result == HTCLIENT) {
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -209,12 +229,16 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         return result;
     }
     case WM_LBUTTONDBLCLK:
-        if (dips(GET_Y_LPARAM(lParam), GetDpiForWindow(window)) < 48) toggleCollapsed();
+        if (isCollapsed()) restoreExpanded();
         return 0;
     case WM_NCLBUTTONDBLCLK:
         if (wParam == HTCAPTION) toggleCollapsed();
         return 0;
     case WM_LBUTTONUP: {
+        if (isCollapsed()) {
+            restoreExpanded();
+            return 0;
+        }
         const UINT dpi = GetDpiForWindow(window);
         const int x = dips(GET_X_LPARAM(lParam), dpi), y = dips(GET_Y_LPARAM(lParam), dpi);
         if (y < 48 && x > MainWidth - 38) DestroyWindow(window_);
@@ -283,20 +307,42 @@ void App::paint() {
     renderTarget_->BeginDraw();
     renderTarget_->Clear(D2D1::ColorF(0xF6F6F8));
 
-    renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, static_cast<float>(client.right), static_cast<float>(client.bottom)), 14, 14), surfaceBrush_);
-    drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
+    const bool horizontal = collapseMode_ == CollapseMode::Horizontal;
+    const bool side = collapseMode_ == CollapseMode::Side;
+    const float layoutWidth = side ? static_cast<float>(SideWidth) :
+        (horizontal ? static_cast<float>(CompactWidth) : static_cast<float>(MainWidth));
+    const float layoutHeight = side ? static_cast<float>(SideHeight) :
+        (horizontal ? static_cast<float>(CompactHeight) : static_cast<float>(MainHeight));
+    const float corner = isCollapsed() ? 18.0f : 14.0f;
+    const auto surface = D2D1::RoundedRect(D2D1::RectF(0, 0, layoutWidth, layoutHeight), corner, corner);
+    renderTarget_->FillRoundedRectangle(surface, surfaceBrush_);
+    renderTarget_->DrawRoundedRectangle(surface, lineBrush_, 1);
 
     const D2D1_COLOR_F statusColor = snapshot_.connected ? D2D1::ColorF(0x28A745) : D2D1::ColorF(0x9B9BA1);
     ID2D1SolidColorBrush* statusBrush = nullptr;
     renderTarget_->CreateSolidColorBrush(statusColor, &statusBrush);
-    renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
-    release(statusBrush);
-    drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
-    drawText(renderTarget_, labelFormat_, accentBrush_, L"设置", D2D1::RectF(286, 14, 342, 40));
-    drawText(renderTarget_, titleFormat_, mutedBrush_, L"×", D2D1::RectF(348, 9, 378, 42));
-    renderTarget_->DrawLine(D2D1::Point2F(0, 49), D2D1::Point2F(static_cast<float>(client.right), 49), lineBrush_, 1);
+    const std::wstring latency = snapshot_.connected ? numberText(snapshot_.sshLatencyMs) : L"—";
+    IDWriteTextFormat* compact = compactFormat_ ? compactFormat_ : labelFormat_;
 
-    if (!collapsed_) {
+    if (side) {
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(22, 20), 4, 4), statusBrush);
+        drawText(renderTarget_, compact, textBrush_, latency, D2D1::RectF(2, 42, 42, 68));
+        drawText(renderTarget_, compact, mutedBrush_, L"ms", D2D1::RectF(2, 65, 42, 89));
+    } else if (horizontal) {
+        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(12, 7, 98, 35));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(109, 21), 4, 4), statusBrush);
+        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(120, 5, 201, 37));
+    } else {
+        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
+        drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
+        drawText(renderTarget_, labelFormat_, accentBrush_, L"设置", D2D1::RectF(286, 14, 342, 40));
+        drawText(renderTarget_, titleFormat_, mutedBrush_, L"×", D2D1::RectF(348, 9, 378, 42));
+        renderTarget_->DrawLine(D2D1::Point2F(0, 49), D2D1::Point2F(MainWidth, 49), lineBrush_, 1);
+    }
+    release(statusBrush);
+
+    if (collapseMode_ == CollapseMode::Expanded) {
         auto card = [&](float x, float y, float width, const std::wstring& label, const std::wstring& value, float level) {
             const auto box = D2D1::RoundedRect(D2D1::RectF(x, y, x + width, y + 66), 11, 11);
             renderTarget_->FillRoundedRectangle(box, surfaceBrush_);
@@ -362,7 +408,7 @@ void App::paint() {
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 362, 275), 3, 3), lineBrush_);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 270, 18 + 344 * progressValue, 275), 3, 3), accentBrush_);
         } else {
-            drawText(renderTarget_, labelFormat_, mutedBrush_, L"双击标题折叠 · 设置中可上传或下载", D2D1::RectF(18, 246, 362, 274));
+            drawText(renderTarget_, labelFormat_, mutedBrush_, L"双击标题或拖到屏幕边缘收起 · 设置中可传输", D2D1::RectF(18, 246, 362, 274));
         }
     }
     const HRESULT result = renderTarget_->EndDraw();
@@ -371,12 +417,88 @@ void App::paint() {
 }
 
 void App::toggleCollapsed() {
-    collapsed_ = !collapsed_;
-    RECT rect{}; GetWindowRect(window_, &rect);
+    if (isCollapsed()) restoreExpanded();
+    else collapseHorizontal(false);
+}
+
+void App::collapseHorizontal(bool dockToTop) {
+    if (isCollapsed()) return;
+    RECT current{}; GetWindowRect(window_, &current);
+    if (!dockToTop || !hasExpandedRect_) {
+        expandedRect_ = current;
+        hasExpandedRect_ = true;
+    }
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
     const UINT dpi = GetDpiForWindow(window_);
-    SetWindowPos(window_, HWND_TOPMOST, rect.left, rect.top, pixels(MainWidth, dpi),
-        pixels(collapsed_ ? CollapsedHeight : MainHeight, dpi), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    const int width = pixels(CompactWidth, dpi);
+    const int height = pixels(CompactHeight, dpi);
+    const int desiredX = current.left + ((current.right - current.left) - width) / 2;
+    const int desiredY = dockToTop ? static_cast<int>(monitor.rcWork.top) : current.top;
+    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left),
+        static_cast<int>(monitor.rcWork.right) - width);
+    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top),
+        static_cast<int>(monitor.rcWork.bottom) - height);
+    collapseMode_ = CollapseMode::Horizontal;
+    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::collapseSide(bool left) {
+    if (isCollapsed()) return;
+    RECT current{}; GetWindowRect(window_, &current);
+    if (!hasExpandedRect_) {
+        expandedRect_ = current;
+        hasExpandedRect_ = true;
+    }
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int width = pixels(SideWidth, dpi);
+    const int height = pixels(SideHeight, dpi);
+    const int x = left ? static_cast<int>(monitor.rcWork.left) :
+        static_cast<int>(monitor.rcWork.right) - width;
+    const int desiredY = current.top + ((current.bottom - current.top) - height) / 2;
+    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top),
+        static_cast<int>(monitor.rcWork.bottom) - height);
+    collapseMode_ = CollapseMode::Side;
+    SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::restoreExpanded() {
+    if (!isCollapsed()) return;
+    RECT target = expandedRect_;
+    if (!hasExpandedRect_) {
+        GetWindowRect(window_, &target);
+        const UINT dpi = GetDpiForWindow(window_);
+        target.right = target.left + pixels(MainWidth, dpi);
+        target.bottom = target.top + pixels(MainHeight, dpi);
+    }
+    collapseMode_ = CollapseMode::Expanded;
+    SetWindowPos(window_, HWND_TOPMOST, target.left, target.top, target.right - target.left,
+        target.bottom - target.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    hasExpandedRect_ = false;
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::handleEdgeDock() {
+    if (isCollapsed()) return;
+    RECT rect{}; GetWindowRect(window_, &rect);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    const int threshold = pixels(EdgeThreshold, GetDpiForWindow(window_));
+    const int topDistance = std::abs(rect.top - static_cast<int>(monitor.rcWork.top));
+    const int leftDistance = std::abs(rect.left - static_cast<int>(monitor.rcWork.left));
+    const int rightDistance = std::abs(rect.right - static_cast<int>(monitor.rcWork.right));
+    const int nearest = std::min({topDistance, leftDistance, rightDistance});
+    if (nearest > threshold) {
+        hasExpandedRect_ = false;
+        return;
+    }
+    if (leftDistance == nearest) collapseSide(true);
+    else if (rightDistance == nearest) collapseSide(false);
+    else collapseHorizontal(true);
 }
 
 void App::createSettingsWindow() {

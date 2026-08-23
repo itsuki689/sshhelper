@@ -20,6 +20,7 @@ public:
     int run(int showCommand);
 
 private:
+    enum class CollapseMode { Expanded, Horizontal, Side };
     static LRESULT CALLBACK mainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK settingsWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -34,6 +35,11 @@ private:
     bool ensureGraphics();
     void resizeGraphics();
     void toggleCollapsed();
+    void collapseHorizontal(bool dockToTop);
+    void collapseSide(bool left);
+    void restoreExpanded();
+    void handleEdgeDock();
+    bool isCollapsed() const { return collapseMode_ != CollapseMode::Expanded; }
 
     bool readSettings(ConnectionConfig& config, std::string& localPath, std::string& remotePath);
     void startMonitor(const ConnectionConfig& config);
@@ -48,7 +54,9 @@ private:
     HWND window_ = nullptr;
     HWND settingsWindow_ = nullptr;
     HFONT uiFont_ = nullptr;
-    bool collapsed_ = false;
+    CollapseMode collapseMode_ = CollapseMode::Expanded;
+    RECT expandedRect_{};
+    bool hasExpandedRect_ = false;
 
     ID2D1Factory* d2dFactory_ = nullptr;
     IDWriteFactory* writeFactory_ = nullptr;
@@ -61,6 +69,7 @@ private:
     IDWriteTextFormat* titleFormat_ = nullptr;
     IDWriteTextFormat* metricFormat_ = nullptr;
     IDWriteTextFormat* labelFormat_ = nullptr;
+    IDWriteTextFormat* compactFormat_ = nullptr;
 
     TelemetrySnapshot snapshot_;
     TransferProgress transfer_;
