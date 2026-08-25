@@ -41,6 +41,8 @@ bool isCpuChip(const std::string& chip) {
     return value.find("coretemp") != std::string::npos ||
            value.find("k10temp") != std::string::npos ||
            value.find("zenpower") != std::string::npos ||
+           value.find("fam15h_power") != std::string::npos ||
+           value.find("intel_rapl") != std::string::npos ||
            value.find("cpu_thermal") != std::string::npos ||
            value.find("soc_thermal") != std::string::npos ||
            value.find("acpitz") != std::string::npos;
@@ -69,6 +71,7 @@ if command -v sensors >/dev/null 2>&1; then
     /^[^[:space:]]/ { chip=$0; label=""; next }
     /temp[0-9]+_input:/ { print "TEMP|" chip "|" label "|" $2 }
     /fan[0-9]+_input:/  { print "FAN|" chip "|" label "|" $2 }
+    /power[0-9]+_(average|input):/ { print "POWER|" chip "|" label "|" $2 }
   '
 fi
 
@@ -88,10 +91,17 @@ if [ -n "$iface" ] && [ -r "/sys/class/net/$iface/statistics/rx_bytes" ]; then
 fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,memory.used,memory.total \
-    --format=csv,noheader,nounits 2>/dev/null | while IFS= read -r line; do
+  gpu_data=$(nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,memory.used,memory.total,power.draw \
+    --format=csv,noheader,nounits 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    gpu_data=$(nvidia-smi --query-gpu=index,name,temperature.gpu,fan.speed,memory.used,memory.total \
+      --format=csv,noheader,nounits 2>/dev/null)
+  fi
+  printf '%s\n' "$gpu_data" | while IFS= read -r line; do
+    if [ -n "$line" ]; then
       printf 'GPU|%s\n' "$line"
-    done
+    fi
+  done
 fi
 printf 'END|1\n'
 )SH";
@@ -138,6 +148,21 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
             } else if (isCpuChip(parts[1]) && snapshot.packageTemperature < 0.0) {
                 snapshot.packageTemperature = value;
             }
+        } else if (parts[0] == "POWER" && parts.size() >= 4) {
+            const double value = real(parts[3]);
+            if (value < 0.0 || value > 10000.0) continue;
+            if (isGpuChip(parts[1])) {
+                auto gpu = std::find_if(snapshot.gpus.begin(), snapshot.gpus.end(), [&](const GpuMetrics& item) {
+                    return item.name == parts[1];
+                });
+                if (gpu == snapshot.gpus.end()) {
+                    snapshot.gpus.push_back(GpuMetrics{parts[1]});
+                    gpu = std::prev(snapshot.gpus.end());
+                }
+                gpu->powerWatts = std::max(gpu->powerWatts, value);
+            } else if (isCpuChip(parts[1])) {
+                snapshot.packagePowerWatts = std::max(snapshot.packagePowerWatts, value);
+            }
         } else if (parts[0] == "FAN" && parts.size() >= 4) {
             const double value = real(parts[3]);
             if (value <= 0.0) continue;
@@ -171,6 +196,7 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
                 gpu.fanPercent = real(fields[3]);
                 gpu.memoryUsed = u64(fields[4]) * 1024ULL * 1024ULL;
                 gpu.memoryTotal = u64(fields[5]) * 1024ULL * 1024ULL;
+                if (fields.size() >= 7) gpu.powerWatts = real(fields[6]);
                 snapshot.gpus.push_back(std::move(gpu));
             }
         }

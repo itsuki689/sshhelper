@@ -99,6 +99,13 @@ std::wstring numberText(double value, const wchar_t* suffix = L"") {
     return buffer;
 }
 
+std::wstring powerLabel(const wchar_t* device, const wchar_t* fallback, double watts) {
+    if (!std::isfinite(watts) || watts < 0.0) return fallback;
+    wchar_t buffer[64]{};
+    swprintf(buffer, 64, watts >= 100.0 ? L"%ls·%.0fW" : L"%ls·%.1fW", device, watts);
+    return buffer;
+}
+
 std::wstring storageText(std::uint64_t bytes) {
     constexpr double BytesPerGigabyte = 1'000'000'000.0;
     wchar_t buffer[64]{};
@@ -509,7 +516,7 @@ void App::paint() {
             const auto box = D2D1::RoundedRect(D2D1::RectF(x, y, x + width, y + 66), 11, 11);
             renderTarget_->FillRoundedRectangle(box, surfaceBrush_);
             renderTarget_->DrawRoundedRectangle(box, lineBrush_, 1);
-            drawText(renderTarget_, labelFormat_, mutedBrush_, label, D2D1::RectF(x + 11, y + 8, x + width - 8, y + 27));
+            drawText(renderTarget_, labelFormat_, mutedBrush_, label, D2D1::RectF(x + 6, y + 8, x + width - 6, y + 27));
             drawText(renderTarget_, valueFormat ? valueFormat : metricFormat_, textBrush_, value,
                 D2D1::RectF(valueFormat ? x + 2 : x + 10, y + 26, valueFormat ? x + width - 2 : x + width - 8, y + 57));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + width - 10, y + 61), 2, 2), lineBrush_);
@@ -518,8 +525,11 @@ void App::paint() {
 
         std::wstring cpu = snapshot_.packageTemperature >= 0 ? numberText(snapshot_.packageTemperature, L"°C") : L"—";
         std::wstring gpu = !snapshot_.gpus.empty() && snapshot_.gpus[0].temperature >= 0 ? numberText(snapshot_.gpus[0].temperature, L"°C") : L"—";
-        card(14, 62, 82, L"CPU 封装", cpu, snapshot_.packageTemperature > 0 ? static_cast<float>(snapshot_.packageTemperature / 100.0) : 0);
-        card(104, 62, 82, L"GPU", gpu, !snapshot_.gpus.empty() ? static_cast<float>(snapshot_.gpus[0].temperature / 100.0) : 0);
+        const double gpuPower = snapshot_.gpus.empty() ? -1.0 : snapshot_.gpus[0].powerWatts;
+        card(14, 62, 82, powerLabel(L"CPU", L"CPU 封装", snapshot_.packagePowerWatts), cpu,
+            snapshot_.packageTemperature > 0 ? static_cast<float>(snapshot_.packageTemperature / 100.0) : 0);
+        card(104, 62, 82, powerLabel(L"GPU", L"GPU", gpuPower), gpu,
+            !snapshot_.gpus.empty() ? static_cast<float>(snapshot_.gpus[0].temperature / 100.0) : 0);
         card(194, 62, 82, L"内存", snapshot_.memoryTotal ? numberText(ratio(snapshot_.memoryUsed, snapshot_.memoryTotal) * 100, L"%") : L"—", ratio(snapshot_.memoryUsed, snapshot_.memoryTotal));
         card(284, 62, 82, L"存储", snapshot_.diskTotal ? storageText(snapshot_.diskUsed) : L"—",
             ratio(snapshot_.diskUsed, snapshot_.diskTotal), compactFormat_);

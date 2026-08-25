@@ -14,6 +14,7 @@ struct SensorValue {
 struct GpuMetrics {
     std::string name;
     double temperature = -1.0;
+    double powerWatts = -1.0;
     double fanPercent = -1.0;
     double fanRpm = -1.0;
     std::uint64_t memoryUsed = 0;
@@ -25,6 +26,7 @@ struct TelemetrySnapshot {
     std::string status = "Not connected";
     std::string fingerprint;
     double packageTemperature = -1.0;
+    double packagePowerWatts = -1.0;
     std::vector<SensorValue> coreTemperatures;
     std::vector<SensorValue> fans;
     std::vector<GpuMetrics> gpus;
