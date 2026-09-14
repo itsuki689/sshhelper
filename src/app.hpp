@@ -12,6 +12,8 @@
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <vector>
+#include <shellapi.h>
 
 class App {
 public:
@@ -20,6 +22,13 @@ public:
     int run(int showCommand);
 
 private:
+    friend struct AppWindowTest;
+    enum ControlId {
+        HostEdit = 2001, PortEdit, UserEdit, PasswordEdit, KeyEdit,
+        LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton,
+        EntireFolder, SelectedFiles, ServerName, NewServer, ReopenServers, DeleteServer,
+        BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey
+    };
     enum class CollapseMode { Expanded, Horizontal, Side };
     static LRESULT CALLBACK mainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK settingsWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -51,7 +60,26 @@ private:
     bool isCollapsed() const { return collapseMode_ != CollapseMode::Expanded; }
 
     bool readSettings(ConnectionConfig& config, std::string& localPath, std::string& remotePath);
-    void rememberConnection(const ConnectionConfig& config);
+    bool rememberConnection(const ConnectionConfig& config, const std::string& local, const std::string& remote);
+    std::vector<App*> servers();
+    void applyProfile(const ServerProfile& profile);
+    ServerProfile profile() const;
+    bool saveServers();
+    void addServer();
+    void reopenServers();
+    void switchServer(bool previous);
+    bool setHotkeys(unsigned next, unsigned previous, bool reportError);
+    void chooseTheme(bool background);
+    void dropFiles(HDROP drop);
+    void uploadDropped(std::vector<std::string> paths);
+    App* root_ = this;
+    std::vector<std::unique_ptr<App>> children_;
+    bool deleted_ = false;
+    std::string serverName_;
+    std::uint32_t background_ = 0xFFFFFF, foreground_ = 0x1D1D1F;
+    unsigned nextHotkey_ = 0x064E, previousHotkey_ = 0x0650;
+    bool hotkeysRegistered_ = false;
+    std::size_t windowSlot_ = 0;
     void startMonitor(const ConnectionConfig& config);
     void stopMonitor();
     void startTransfer(TransferDirection direction);

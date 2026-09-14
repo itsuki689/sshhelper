@@ -194,8 +194,31 @@ int runTests() {
     badName.clear();
     remoteFiles["/empty/link"] = {LIBSSH2_SFTP_S_IFLNK, "/out"};
     CHECK(session.listFolder(TransferDirection::Download, "/empty", entries, error) && entries.empty());
+    CHECK(session.uploadPaths({utf8(source / "a.txt"), utf8(source / "sub"),
+        utf8(source / fs::path(L"中文.txt")), utf8(source / "zero")}, "/dropped", progress, error));
+    CHECK(final.completed && final.filesCompleted == 4 && final.total == 70013 && final.transferred == final.total);
+    CHECK(remoteFiles.at("/dropped/a.txt").data == "alpha");
+    CHECK(remoteFiles.at("/dropped/sub/b.txt").data == std::string(70001, 'b'));
+    CHECK(LIBSSH2_SFTP_S_ISDIR(remoteFiles.at("/dropped/sub/empty").mode));
+    CHECK(remoteFiles.at("/dropped/中文.txt").data == "unicode");
+    CHECK(!remoteFiles.contains("/dropped/source"));
+    CHECK(session.uploadPaths({utf8(source / "a.txt"), utf8(source / "a.txt")}, "/deduplicated", progress, error));
+    CHECK(final.filesCompleted == 1);
+    fs::create_directory(root / "other");
+    { std::ofstream(root / "other/a.txt") << "different"; }
+    CHECK(!session.uploadPaths({utf8(source / "a.txt"), utf8(root / "other/a.txt")}, "/collision", progress, error));
+    CHECK(final.failed && !remoteFiles.contains("/collision"));
+    CHECK(!session.uploadPaths({}, "/no-drop", progress, error));
+    CHECK(!session.uploadPaths({"relative.txt"}, "/no-drop", progress, error));
+    CHECK(!session.uploadPaths({utf8(root / "missing")}, "/no-drop", progress, error));
+    CHECK(!remoteFiles.contains("/no-drop"));
+    CHECK(session.uploadPaths({utf8(root / "empty")}, "/empty-drop", progress, error));
+    CHECK(final.completed && final.filesTotal == 0 && remoteFiles.contains("/empty-drop/empty"));
+
     failWrite = true;
     CHECK(!session.transferFolder(TransferDirection::Upload, utf8(source), "/failed", std::nullopt, progress, error));
+    CHECK(final.failed && !final.completed);
+    CHECK(!session.uploadPaths({utf8(source / "a.txt")}, "/drop-failure", progress, error));
     CHECK(final.failed && !final.completed);
     failWrite = false; failClose = true;
     CHECK(!session.transferFolder(TransferDirection::Upload, utf8(source), "/close", std::nullopt, progress, error));
@@ -207,6 +230,8 @@ int runTests() {
     stop.request_stop();
     CHECK(!session.transferFolder(TransferDirection::Upload, utf8(source), "/cancelled", std::nullopt, progress, error));
     CHECK(final.failed && !final.completed && error == "Transfer cancelled");
+    CHECK(!session.uploadPaths({utf8(source / "a.txt")}, "/drop-cancelled", progress, error));
+    CHECK(final.failed && error == "Transfer cancelled");
     std::cout << "Recursive/selected folder upload and download, empty/Unicode files, failures and path validation: OK\n";
     return 0;
 }

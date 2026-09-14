@@ -200,6 +200,18 @@ bool SshSession::listFolder(TransferDirection direction, const std::string& fold
 bool SshSession::transferFolder(TransferDirection direction, const std::string& localFolder,
     const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
     const std::function<void(const TransferProgress&)>& progress, std::string& error) {
+    return transferItems(direction, localFolder, remoteFolder, selection, nullptr, progress, error);
+}
+
+bool SshSession::uploadPaths(const std::vector<std::string>& paths, const std::string& remoteFolder,
+    const std::function<void(const TransferProgress&)>& progress, std::string& error) {
+    return transferItems(TransferDirection::Upload, ".", remoteFolder, std::nullopt, &paths, progress, error);
+}
+
+bool SshSession::transferItems(TransferDirection direction, const std::string& localFolder,
+    const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
+    const std::vector<std::string>* drops,
+    const std::function<void(const TransferProgress&)>& progress, std::string& error) {
     TransferProgress state;
     state.active = true;
     state.direction = direction;
@@ -217,8 +229,46 @@ bool SshSession::transferFolder(TransferDirection direction, const std::string& 
         const auto remote = remoteRoot(remoteFolder);
         const auto local = fs::absolute(fs::u8path(localFolder)).lexically_normal();
         std::vector<TransferEntry> entries;
-        if (!listFolder(direction, direction == TransferDirection::Upload ? localFolder : remote,
-                        entries, error)) throw std::runtime_error(error);
+        std::map<std::string, fs::path> dropSources;
+        if (drops) {
+            if (drops->empty() || drops->size() > 100000) throw std::runtime_error("No files selected or too many dropped paths");
+            std::set<std::wstring> roots;
+            std::vector<fs::path> paths;
+            for (const auto& name : *drops) {
+                const auto path = fs::u8path(name).lexically_normal();
+                if (!path.is_absolute() || path.filename().empty())
+                    throw std::runtime_error("Drop an absolute file or folder path, not a drive root");
+                const auto key = windowsKey(encoded(path.relative_path()));
+                const auto fullKey = path.root_name().wstring() + key;
+                if (roots.insert(fullKey).second) paths.push_back(path);
+            }
+            for (const auto& path : paths) {
+                if (stop_.stop_requested()) throw std::runtime_error("Transfer cancelled");
+                const bool directory = fs::is_directory(path);
+                checkLocal(path, directory, false);
+                if (!directory && !fs::is_regular_file(path))
+                    throw std::runtime_error("Dropped path is not a regular file");
+                const auto base = encoded(path.filename());
+                entries.push_back({base, directory, directory ? 0 : fs::file_size(path)});
+                dropSources.emplace(base, path);
+                if (directory) {
+                    std::vector<TransferEntry> children;
+                    if (!listFolder(TransferDirection::Upload, encoded(path), children, error))
+                        throw std::runtime_error(error);
+                    for (auto& child : children) {
+                        const auto source = path / fs::u8path(child.relativePath);
+                        child.relativePath = base + "/" + child.relativePath;
+                        dropSources.emplace(child.relativePath, source);
+                        entries.push_back(std::move(child));
+                    }
+                }
+                if (entries.size() > 100000) throw std::runtime_error("Drop exceeds 100000 entries");
+            }
+            std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+                return a.relativePath < b.relativePath;
+            });
+        } else if (!listFolder(direction, direction == TransferDirection::Upload ? localFolder : remote,
+                               entries, error)) throw std::runtime_error(error);
         if (selection) {
             if (selection->empty()) throw std::runtime_error("No files or folders selected");
             std::set<std::string> wanted(selection->begin(), selection->end());
@@ -255,7 +305,7 @@ bool SshSession::transferFolder(TransferDirection direction, const std::string& 
         std::uint64_t completedBytes = 0;
         for (const auto& entry : entries) {
             if (stop_.stop_requested()) throw std::runtime_error("Transfer cancelled");
-            const auto localFile = local / fs::u8path(entry.relativePath);
+            const auto localFile = drops ? dropSources.at(entry.relativePath) : local / fs::u8path(entry.relativePath);
             const auto remoteFile = remotePath(remote, entry.relativePath);
             state.fileName = entry.relativePath;
             if (direction == TransferDirection::Upload) {

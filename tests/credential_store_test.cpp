@@ -50,7 +50,55 @@ int main() {
     CHECK(loaded.privateKeyPath == source.privateKeyPath);
     CHECK(loaded.keyPassphrase == source.keyPassphrase);
 
-    auto damaged = bytes;
+    ServerSettings migrated;
+    CHECK(loadServerSettings(path, migrated, error));
+    CHECK(migrated.servers.size() == 1);
+    CHECK(migrated.servers.front().connection.password == source.password);
+    CHECK(migrated.servers.front().name == source.host);
+    ServerSettings multiple;
+    ServerProfile first;
+    first.connection = source;
+    first.name = "工作服务器";
+    first.localFolder = "D:/数据";
+    first.remoteFolder = "/srv/data";
+    first.background = 0x123456;
+    first.foreground = 0xF1F2F3;
+    multiple.servers.push_back(first);
+    auto second = first;
+    second.connection.host = "second.example";
+    second.connection.password = "second-secret";
+    second.name = "Backup";
+    multiple.servers.push_back(second);
+    multiple.nextHotkey = 0x064A;
+    multiple.previousHotkey = 0x064B;
+    CHECK(saveServerSettings(path, multiple, error));
+    ServerSettings restored;
+    CHECK(loadServerSettings(path, restored, error));
+    CHECK(restored.servers.size() == 2);
+    CHECK(restored.servers[0].name == first.name);
+    CHECK(restored.servers[0].localFolder == first.localFolder);
+    CHECK(restored.servers[0].remoteFolder == first.remoteFolder);
+    CHECK(restored.servers[0].background == first.background);
+    CHECK(restored.servers[0].foreground == first.foreground);
+    CHECK(restored.servers[1].connection.host == second.connection.host);
+    CHECK(restored.servers[1].connection.password == second.connection.password);
+    CHECK(restored.nextHotkey == multiple.nextHotkey && restored.previousHotkey == multiple.previousHotkey);
+    auto invalid = multiple;
+    invalid.servers[0].background = 0x1000000;
+    CHECK(!saveServerSettings(path, invalid, error));
+    CHECK(loadServerSettings(path, restored, error) && restored.servers.size() == 2);
+    invalid = multiple;
+    invalid.servers.resize(65);
+    CHECK(!saveServerSettings(path, invalid, error));
+    std::ifstream encryptedProfiles(path, std::ios::binary);
+    const std::vector<char> profileBytes((std::istreambuf_iterator<char>(encryptedProfiles)), {});
+    encryptedProfiles.close();
+    CHECK(std::search(profileBytes.begin(), profileBytes.end(), second.connection.password.begin(),
+        second.connection.password.end()) == profileBytes.end());
+    CHECK(saveServerSettings(path, ServerSettings{}, error));
+    CHECK(loadServerSettings(path, restored, error) && restored.servers.empty());
+
+    auto damaged = profileBytes;
     damaged.back() ^= 0x5a;
     std::ofstream corrupted(path, std::ios::binary | std::ios::trunc);
     CHECK(corrupted);
@@ -61,6 +109,9 @@ int main() {
     const bool corruptedLoaded = loadConnectionCredentials(path, rejected, error);
     CHECK(!corruptedLoaded);
 
+    ServerSettings unchanged = multiple;
+    CHECK(!loadServerSettings(path, unchanged, error));
+    CHECK(unchanged.servers.size() == 2 && unchanged.servers.front().name == first.name);
     std::filesystem::remove(path);
     return 0;
 }

@@ -36,6 +36,9 @@ public:
                         const std::function<void(const TransferProgress&)>& progress,
                         std::string& error);
 
+    bool uploadPaths(const std::vector<std::string>& paths, const std::string& remoteFolder,
+                     const std::function<void(const TransferProgress&)>& progress, std::string& error);
+
     bool transfer(TransferDirection direction,
                   const std::string& localPath,
                   const std::string& remotePath,
@@ -43,6 +46,10 @@ public:
                   std::string& error);
 
 private:
+    bool transferItems(TransferDirection direction, const std::string& localFolder,
+        const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
+        const std::vector<std::string>* drops,
+        const std::function<void(const TransferProgress&)>& progress, std::string& error);
     std::string sessionError(const std::string& fallback) const;
 
     std::stop_token stop_;

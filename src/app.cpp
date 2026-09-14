@@ -40,7 +40,7 @@ constexpr UINT_PTR AnimationTimerId = 1;
 constexpr UINT AnimationFrameMs = 15;
 constexpr ULONGLONG AnimationDurationMs = 180;
 constexpr int SettingsWidth = 480;
-constexpr int SettingsHeight = 488;
+constexpr int SettingsHeight = 650;
 constexpr int SettingsHeaderHeight = 52;
 
 int pixels(int dips, UINT dpi) {
@@ -50,12 +50,6 @@ int pixels(int dips, UINT dpi) {
 int dips(int value, UINT dpi) {
     return MulDiv(value, 96, static_cast<int>(dpi));
 }
-
-enum ControlId {
-    HostEdit = 2001, PortEdit, UserEdit, PasswordEdit, KeyEdit,
-    LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton,
-    EntireFolder, SelectedFiles
-};
 
 template <typename T> void release(T*& value) {
     if (value) { value->Release(); value = nullptr; }
@@ -208,16 +202,44 @@ App::~App() {
 }
 
 int App::run(int showCommand) {
-    std::string credentialError;
-    if (!loadConnectionCredentials(defaultCredentialPath(), config_, credentialError))
-        snapshot_.status = credentialError;
+    ServerSettings saved;
+    std::string error;
+    loadServerSettings(defaultCredentialPath(), saved, error);
+    if (!saved.servers.empty()) applyProfile(saved.servers.front());
     if (!registerClasses() || !createMainWindow(showCommand)) return 1;
+    if (!error.empty()) { snapshot_.status = error; InvalidateRect(window_, nullptr, FALSE); }
+    for (std::size_t i = 1; i < saved.servers.size(); ++i) {
+        auto child = std::make_unique<App>(instance_);
+        child->root_ = this;
+        child->windowSlot_ = i;
+        child->applyProfile(saved.servers[i]);
+        child->createMainWindow(SW_SHOWNOACTIVATE);
+        children_.push_back(std::move(child));
+    }
+    nextHotkey_ = saved.nextHotkey;
+    previousHotkey_ = saved.previousHotkey;
+    setHotkeys(saved.nextHotkey, saved.previousHotkey, true);
+    for (auto* server : servers())
+        if (server->window_ && !server->config_.host.empty()) server->startMonitor(server->config_);
+    if (config_.host.empty()) showSettings();
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (settingsWindow_ && IsWindowVisible(settingsWindow_) && IsDialogMessageW(settingsWindow_, &message))
+        if (message.message == WM_HOTKEY && !message.hwnd) {
+            switchServer(message.wParam == 2);
             continue;
-        TranslateMessage(&message);
-        DispatchMessageW(&message);
+        }
+        bool handled = false;
+        for (auto* server : servers()) {
+            if (server->settingsWindow_ && IsWindowVisible(server->settingsWindow_) &&
+                IsDialogMessageW(server->settingsWindow_, &message)) { handled = true; break; }
+        }
+        if (!handled) { TranslateMessage(&message); DispatchMessageW(&message); }
+    }
+    UnregisterHotKey(nullptr, 1);
+    UnregisterHotKey(nullptr, 2);
+    for (auto* server : servers()) {
+        server->stopMonitor();
+        server->stopTransfer();
     }
     return static_cast<int>(message.wParam);
 }
@@ -248,21 +270,37 @@ bool App::registerClasses() {
 }
 
 bool App::createMainWindow(int showCommand) {
+    transfer_ = {};
+    snapshot_ = {};
+    collapseMode_ = CollapseMode::Expanded;
+    animating_ = false;
+    hasExpandedRect_ = false;
+    compactPointerDown_ = false;
+    compactDragging_ = false;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const UINT dpi = GetDpiForSystem();
     const int width = pixels(MainWidth, dpi);
     const int height = pixels(MainHeight, dpi);
     const int margin = pixels(24, dpi);
-    window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, MainClass, L"AirSFTP Monitor",
-        WS_POPUP, work.right - width - margin, work.bottom - height - margin,
+    const int rows = std::max(1, (int(work.bottom - work.top) - margin) / (height + margin));
+    const int columns = std::max(1, (int(work.right - work.left) - margin) / (width + margin));
+    const int slot = static_cast<int>(windowSlot_) % (rows * columns);
+    window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, MainClass,
+        wide(serverName_.empty() ? "AirSFTP" : serverName_).c_str(),
+        WS_POPUP, std::max(int(work.left), int(work.right) - (slot / rows + 1) * (width + margin)),
+        std::max(int(work.top), int(work.bottom) - (slot % rows + 1) * (height + margin)),
         width, height, nullptr, nullptr, instance_, this);
     if (!window_) return false;
-    messageWindow_ = window_;
+    {
+        std::lock_guard lock(messageMutex_);
+        messageWindow_ = window_;
+    }
+    DragAcceptFiles(window_, TRUE);
     constexpr DWORD roundPreference = 2;
     constexpr auto cornerAttribute = static_cast<DWMWINDOWATTRIBUTE>(33);
     DwmSetWindowAttribute(window_, cornerAttribute, &roundPreference, sizeof(roundPreference));
-    ShowWindow(window_, showCommand == SW_HIDE ? SW_SHOWNOACTIVATE : showCommand);
+    ShowWindow(window_, showCommand);
     UpdateWindow(window_);
     return true;
 }
@@ -278,6 +316,7 @@ LRESULT CALLBACK App::mainWindowProc(HWND window, UINT message, WPARAM wParam, L
 
 LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_DROPFILES: dropFiles(reinterpret_cast<HDROP>(wParam)); return 0;
     case WM_PAINT: paint(); return 0;
     case WM_SIZE: resizeGraphics(); return 0;
     case WM_TIMER:
@@ -429,7 +468,11 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         }
         KillTimer(window_, AnimationTimerId);
         window_ = nullptr;
-        PostQuitMessage(0);
+        discardGraphics();
+        if (config_.host.empty()) deleted_ = true;
+        const auto open = servers();
+        if (std::none_of(open.begin(), open.end(), [](App* app) { return app->window_ != nullptr; }))
+            PostQuitMessage(0);
         return 0;
     }
     }
@@ -445,10 +488,10 @@ bool App::ensureGraphics() {
     if (!renderTarget_) return false;
     const auto dpi = static_cast<float>(GetDpiForWindow(window_));
     renderTarget_->SetDpi(dpi, dpi);
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x1D1D1F), &textBrush_);
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x74747B), &mutedBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(foreground_), &textBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(foreground_), &mutedBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x087FF5), &accentBrush_);
-    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF), &surfaceBrush_);
+    renderTarget_->CreateSolidColorBrush(D2D1::ColorF(background_), &surfaceBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xE4E4E8), &lineBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFF5F57), &rankRedBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0xFFBD2E), &rankYellowBrush_);
@@ -472,17 +515,19 @@ void App::paint() {
     PAINTSTRUCT paint{};
     HDC paintDc = BeginPaint(window_, &paint);
     RECT client{}; GetClientRect(window_, &client);
-    FillRect(paintDc, &client, GetSysColorBrush(COLOR_WINDOW));
+    HBRUSH background = CreateSolidBrush(RGB(background_ >> 16, (background_ >> 8) & 255, background_ & 255));
+    FillRect(paintDc, &client, background);
+    DeleteObject(background);
     if (!ensureGraphics()) {
         SetBkMode(paintDc, TRANSPARENT);
-        SetTextColor(paintDc, RGB(29, 29, 31));
+        SetTextColor(paintDc, RGB(foreground_ >> 16, (foreground_ >> 8) & 255, foreground_ & 255));
         const wchar_t* message = L"AirSFTP graphics initialization failed";
         TextOutW(paintDc, 18, 18, message, static_cast<int>(wcslen(message)));
         EndPaint(window_, &paint);
         return;
     }
     renderTarget_->BeginDraw();
-    renderTarget_->Clear(D2D1::ColorF(0xF6F6F8));
+    renderTarget_->Clear(D2D1::ColorF(background_));
 
     const bool horizontal = collapseMode_ == CollapseMode::Horizontal;
     const bool side = collapseMode_ == CollapseMode::Side;
@@ -529,7 +574,7 @@ void App::paint() {
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(14, 16), 4, 4), statusBrush);
         drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(24, 1, 96, 31));
     } else {
-        drawText(renderTarget_, titleFormat_, textBrush_, L"AirSFTP", D2D1::RectF(18, 13, 130, 42));
+        drawText(renderTarget_, titleFormat_, textBrush_, wide(serverName_.empty() ? "AirSFTP" : serverName_), D2D1::RectF(18, 13, 140, 42));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
         drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
         drawGearIcon(renderTarget_, d2dFactory_, mutedBrush_, surfaceBrush_, D2D1::Point2F(314, 27));
@@ -927,8 +972,8 @@ void App::rebuildSettingsFonts(UINT dpi) {
     settingsButtonFont_ = makeFont(13, FW_SEMIBOLD);
 
     if (settingsWindow_) {
-        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit};
-        constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton};
+        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
+        constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton, NewServer, ReopenServers, DeleteServer, BackgroundColor, ForegroundColor};
         for (int id : edits)
             SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
                 reinterpret_cast<WPARAM>(uiFont_), TRUE);
@@ -961,11 +1006,19 @@ void App::layoutSettings(UINT dpi) {
     move(RemoteEdit, 34, 336, 412, 22);
     move(EntireFolder, 24, 371, 170, 24);
     move(SelectedFiles, 210, 371, 220, 24);
-    move(SaveConnect, 162, 433, 126, 38);
-    move(UploadButton, 296, 433, 76, 38);
-    move(DownloadButton, 380, 433, 76, 38);
+    move(ServerName, 34, 432, 190, 24);
+    move(BackgroundColor, 236, 429, 104, 32);
+    move(ForegroundColor, 350, 429, 106, 32);
+    move(NextHotkey, 24, 490, 208, 28);
+    move(PreviousHotkey, 248, 490, 208, 28);
+    move(NewServer, 24, 540, 132, 34);
+    move(ReopenServers, 166, 540, 148, 34);
+    move(DeleteServer, 324, 540, 132, 34);
+    move(SaveConnect, 162, 596, 126, 38);
+    move(UploadButton, 296, 596, 76, 38);
+    move(DownloadButton, 380, 596, 76, 38);
 
-    constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit};
+    constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
     for (int id : edits) {
         HWND edit = GetDlgItem(settingsWindow_, id);
         SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
@@ -1009,6 +1062,7 @@ void App::paintSettings() {
     field(24, 206, 432, 34);
     field(24, 268, 346, 34);
     field(24, 330, 432, 34);
+    field(24, 428, 204, 34);
 
     SetBkMode(buffer, TRANSPARENT);
     SetTextColor(buffer, RGB(29, 29, 31));
@@ -1033,6 +1087,9 @@ void App::paintSettings() {
         RECT rect{p(x), p(y), p(x + width), p(y + 18)};
         DrawTextW(buffer, value, -1, &rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     };
+    label(L"服务器名称", 24, 408, 204);
+    label(L"切换到下一个窗口（全局）", 24, 469, 208);
+    label(L"切换到上一个窗口（全局）", 248, 469, 208);
     label(L"主机", 24, 61, 314);
     label(L"端口", 350, 61, 106);
     label(L"用户名", 24, 123, 176);
@@ -1042,7 +1099,7 @@ void App::paintSettings() {
     label(L"远程文件夹", 24, 309, 432);
 
     SetTextColor(buffer, RGB(142, 142, 147));
-    RECT note{p(24), p(401), p(456), p(425)};
+    RECT note{p(24), p(575), p(456), p(593)};
     DrawTextW(buffer, L"保留子目录结构 · 同名文件覆盖 · 不跟随符号链接", -1, &note,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -1136,11 +1193,24 @@ void App::createSettingsWindow() {
     SendMessageW(key, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"可选：私钥文件路径"));
     SendMessageW(local, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"选择本地文件夹"));
     SendMessageW(remote, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"/tmp/"));
+    addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, ServerName, uiFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"页面颜色", BS_OWNERDRAW, 0, 0, 1, 1, BackgroundColor, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"文字颜色", BS_OWNERDRAW, 0, 0, 1, 1, ForegroundColor, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"新增服务器", BS_OWNERDRAW, 0, 0, 1, 1, NewServer, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"打开全部窗口", BS_OWNERDRAW, 0, 0, 1, 1, ReopenServers, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"删除此服务器", BS_OWNERDRAW, 0, 0, 1, 1, DeleteServer, settingsButtonFont_);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
+    InitCommonControlsEx(&controls);
+    addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, NextHotkey, uiFont_);
+    addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, PreviousHotkey, uiFont_);
     layoutSettings(dpi);
 }
 void App::showSettings() {
     if (!settingsWindow_) createSettingsWindow();
     if (!settingsWindow_) return;
+    SetWindowTextW(GetDlgItem(settingsWindow_, ServerName), wide(serverName_).c_str());
+    SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_SETHOTKEY, root_->nextHotkey_, 0);
+    SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, root_->previousHotkey_, 0);
     SetWindowTextW(GetDlgItem(settingsWindow_, HostEdit), wide(config_.host).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, PortEdit), std::to_wstring(config_.port).c_str());
     SetWindowTextW(GetDlgItem(settingsWindow_, UserEdit), wide(config_.username).c_str());
@@ -1156,8 +1226,8 @@ void App::showSettings() {
     const int dialogHeight = dialog.bottom - dialog.top;
     const int desiredX = owner.left + ((owner.right - owner.left) - dialogWidth) / 2;
     const int desiredY = owner.top + ((owner.bottom - owner.top) - dialogHeight) / 2;
-    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - dialogWidth);
-    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), static_cast<int>(monitor.rcWork.bottom) - dialogHeight);
+    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), std::max(static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - dialogWidth));
+    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), std::max(static_cast<int>(monitor.rcWork.top), static_cast<int>(monitor.rcWork.bottom) - dialogHeight));
     SetWindowPos(settingsWindow_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(settingsWindow_);
 }
@@ -1228,12 +1298,23 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case NewServer: addServer(); return 0;
+        case ReopenServers: reopenServers(); return 0;
+        case BackgroundColor: chooseTheme(true); return 0;
+        case ForegroundColor: chooseTheme(false); return 0;
+        case DeleteServer: {
+            if (MessageBoxW(settingsWindow_, L"删除此服务器的已保存配置并关闭窗口？",
+                L"AirSFTP", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+            deleted_ = true;
+            if (!saveServers()) { deleted_ = false; return 0; }
+            DestroyWindow(window_);
+            return 0;
+        }
         case BrowseLocal: chooseLocalFolder(); return 0;
         case SaveConnect: {
             ConnectionConfig config; std::string local, remote;
             if (readSettings(config, local, remote)) {
-                config_ = config; localPath_ = local; remotePath_ = remote;
-                rememberConnection(config_);
+                if (!rememberConnection(config, local, remote)) return 0;
                 startMonitor(config_); ShowWindow(settingsWindow_, SW_HIDE);
             }
             return 0;
@@ -1255,7 +1336,12 @@ bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::st
     config.keyPassphrase = config.privateKeyPath.empty() ? std::string{} : config.password;
     localPath = utf8(controlText(settingsWindow_, LocalEdit));
     remotePath = utf8(controlText(settingsWindow_, RemoteEdit));
-    try { config.port = std::stoi(controlText(settingsWindow_, PortEdit)); } catch (...) { config.port = 0; }
+    try {
+        const auto value = controlText(settingsWindow_, PortEdit);
+        std::size_t used = 0;
+        config.port = std::stoi(value, &used);
+        if (used != value.size()) config.port = 0;
+    } catch (...) { config.port = 0; }
     if (config.host.empty() || config.username.empty() || config.port < 1 || config.port > 65535 ||
         (config.password.empty() && config.privateKeyPath.empty())) {
         MessageBoxW(settingsWindow_, L"请填写主机、端口、用户名，并提供密码或私钥。", L"AirSFTP", MB_OK | MB_ICONWARNING);
@@ -1264,10 +1350,25 @@ bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::st
     return true;
 }
 
-void App::rememberConnection(const ConnectionConfig& config) {
-    std::string error;
-    if (!saveConnectionCredentials(defaultCredentialPath(), config, error) && settingsWindow_)
-        MessageBoxW(settingsWindow_, wide(error).c_str(), L"AirSFTP 凭据保存失败", MB_OK | MB_ICONWARNING);
+bool App::rememberConnection(const ConnectionConfig& config, const std::string& local, const std::string& remote) {
+    const auto old = profile();
+    const auto oldNext = root_->nextHotkey_, oldPrevious = root_->previousHotkey_;
+    const auto next = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_GETHOTKEY, 0, 0));
+    const auto previous = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_GETHOTKEY, 0, 0));
+    if (!setHotkeys(next, previous, true)) return false;
+    config_ = config;
+    localPath_ = local;
+    remotePath_ = remote;
+    serverName_ = utf8(controlText(settingsWindow_, ServerName));
+    if (serverName_.empty()) serverName_ = config_.host;
+    if (!saveServers()) {
+        applyProfile(old);
+        setHotkeys(oldNext, oldPrevious, false);
+        return false;
+    }
+    SetWindowTextW(window_, wide(serverName_).c_str());
+    InvalidateRect(window_, nullptr, FALSE);
+    return true;
 }
 
 void App::chooseLocalFolder() {
@@ -1373,8 +1474,7 @@ void App::startTransfer(TransferDirection direction) {
         if (!chooseTransferEntries(settingsWindow_, config, direction,
             direction == TransferDirection::Upload ? local : remote, *selection)) return;
     }
-    config_ = config; localPath_ = local; remotePath_ = remote;
-    rememberConnection(config_);
+    if (!rememberConnection(config, local, remote)) return;
     startMonitor(config_);
     stopTransfer();
     const auto generation = transferGeneration_;

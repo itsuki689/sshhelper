@@ -37,6 +37,8 @@ std::filesystem::path knownHostsPath() {
 }
 
 bool verifyOrRememberHost(const ConnectionConfig& config, const std::string& fingerprint, std::string& error) {
+    static std::mutex knownHostsMutex;
+    std::lock_guard lock(knownHostsMutex);
     const auto path = knownHostsPath();
     const std::string key = config.host + ":" + std::to_string(config.port) + " ";
     std::ifstream input(path);

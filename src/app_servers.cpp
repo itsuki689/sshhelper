@@ -1,0 +1,230 @@
+#include "app.hpp"
+#include "credential_store.hpp"
+#include "ssh_client.hpp"
+#include <commctrl.h>
+#include <commdlg.h>
+#include <algorithm>
+#include <filesystem>
+
+namespace {
+std::wstring wide(const std::string& value) {
+    if (value.empty()) return {};
+    std::wstring text(MultiByteToWideChar(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), int(value.size()), text.data(), int(text.size()));
+    return text;
+}
+std::string encoded(const std::wstring& value) {
+    const auto text = std::filesystem::path(value).u8string();
+    return {text.begin(), text.end()};
+}
+UINT modifiers(unsigned shortcut) {
+    const auto flags = HIBYTE(shortcut);
+    return MOD_NOREPEAT | ((flags & HOTKEYF_CONTROL) ? MOD_CONTROL : 0) |
+        ((flags & HOTKEYF_ALT) ? MOD_ALT : 0) | ((flags & HOTKEYF_SHIFT) ? MOD_SHIFT : 0);
+}
+COLORREF colorRef(std::uint32_t rgb) { return RGB(rgb >> 16, (rgb >> 8) & 255, rgb & 255); }
+}
+
+std::vector<App*> App::servers() {
+    std::vector<App*> result;
+    if (!root_->deleted_) result.push_back(root_);
+    for (auto& child : root_->children_)
+        if (!child->deleted_) result.push_back(child.get());
+    return result;
+}
+
+void App::applyProfile(const ServerProfile& value) {
+    config_ = value.connection;
+    serverName_ = value.name.empty() ? value.connection.host : value.name;
+    localPath_ = value.localFolder;
+    remotePath_ = value.remoteFolder;
+    background_ = value.background;
+    foreground_ = value.foreground;
+}
+
+ServerProfile App::profile() const {
+    ServerProfile value;
+    value.connection = config_;
+    value.name = serverName_;
+    value.localFolder = localPath_;
+    value.remoteFolder = remotePath_;
+    value.background = background_;
+    value.foreground = foreground_;
+    return value;
+}
+
+bool App::saveServers() {
+    ServerSettings saved;
+    saved.nextHotkey = root_->nextHotkey_;
+    saved.previousHotkey = root_->previousHotkey_;
+    for (auto* server : servers())
+        if (!server->config_.host.empty()) saved.servers.push_back(server->profile());
+    std::string error;
+    if (saveServerSettings(defaultCredentialPath(), saved, error)) return true;
+    MessageBoxW(settingsWindow_ ? settingsWindow_ : window_, wide(error).c_str(),
+        L"AirSFTP 配置保存失败", MB_OK | MB_ICONWARNING);
+    return false;
+}
+
+void App::addServer() {
+    if (servers().size() >= 64) {
+        MessageBoxW(settingsWindow_, L"最多支持 64 台服务器。", L"AirSFTP", MB_OK);
+        return;
+    }
+    auto server = std::make_unique<App>(instance_);
+    server->root_ = root_;
+    server->windowSlot_ = root_->children_.size() + 1;
+    auto* added = server.get();
+    root_->children_.push_back(std::move(server));
+    if (!added->createMainWindow(SW_SHOWNORMAL)) {
+        added->deleted_ = true;
+        MessageBoxW(settingsWindow_, L"无法创建服务器窗口。", L"AirSFTP", MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (settingsWindow_) ShowWindow(settingsWindow_, SW_HIDE);
+    added->showSettings();
+}
+
+void App::reopenServers() {
+    for (auto* server : servers()) {
+        if (server->window_) continue;
+        server->collapseMode_ = CollapseMode::Expanded;
+        server->animating_ = false;
+        server->hasExpandedRect_ = false;
+        if (server->createMainWindow(SW_SHOWNOACTIVATE) && !server->config_.host.empty())
+            server->startMonitor(server->config_);
+    }
+}
+
+void App::switchServer(bool previous) {
+    auto open = servers();
+    std::erase_if(open, [](App* app) { return !app->window_; });
+    if (open.empty()) return;
+    const HWND foreground = GetForegroundWindow();
+    auto current = std::find_if(open.begin(), open.end(), [foreground](App* app) {
+        return app->window_ == foreground || app->settingsWindow_ == foreground;
+    });
+    std::size_t index = current == open.end() ? (previous ? 0 : open.size() - 1) :
+        std::size_t(current - open.begin());
+    index = (index + (previous ? open.size() - 1 : 1)) % open.size();
+    auto* target = open[index];
+    if (target->animating_) target->finishWindowAnimation();
+    if (target->isCollapsed()) target->restoreExpanded();
+    SetWindowPos(target->window_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(target->window_);
+}
+
+bool App::setHotkeys(unsigned next, unsigned previous, bool reportError) {
+    auto* owner = root_;
+    if (owner->hotkeysRegistered_ && next == owner->nextHotkey_ && previous == owner->previousHotkey_)
+        return true;
+    auto valid = [](unsigned key) {
+        return key <= 0x0FFF && LOBYTE(key) != 0 && (HIBYTE(key) & (HOTKEYF_CONTROL | HOTKEYF_ALT));
+    };
+    auto warn = [&](const wchar_t* message) {
+        if (reportError) MessageBoxW(settingsWindow_ ? settingsWindow_ : window_, message,
+            L"AirSFTP 快捷键", MB_OK | MB_ICONWARNING);
+    };
+    if (!valid(next) || !valid(previous) ||
+        (LOBYTE(next) == LOBYTE(previous) && modifiers(next) == modifiers(previous))) {
+        warn(L"请设置两个不同的快捷键，至少包含 Ctrl 或 Alt。");
+        return false;
+    }
+    const bool hadOld = owner->hotkeysRegistered_;
+    UnregisterHotKey(nullptr, 1);
+    UnregisterHotKey(nullptr, 2);
+    const bool first = RegisterHotKey(nullptr, 1, modifiers(next), LOBYTE(next)) != FALSE;
+    const bool second = first && RegisterHotKey(nullptr, 2, modifiers(previous), LOBYTE(previous)) != FALSE;
+    if (!second) {
+        UnregisterHotKey(nullptr, 1);
+        UnregisterHotKey(nullptr, 2);
+        bool restored = false;
+        if (hadOld) {
+            const bool a = RegisterHotKey(nullptr, 1, modifiers(owner->nextHotkey_), LOBYTE(owner->nextHotkey_)) != FALSE;
+            const bool b = RegisterHotKey(nullptr, 2, modifiers(owner->previousHotkey_), LOBYTE(owner->previousHotkey_)) != FALSE;
+            restored = a && b;
+            if (!restored) { UnregisterHotKey(nullptr, 1); UnregisterHotKey(nullptr, 2); }
+        }
+        owner->hotkeysRegistered_ = restored;
+        warn(L"快捷键被其他程序占用或不受系统支持，请更换组合。");
+        return false;
+    }
+    owner->hotkeysRegistered_ = true;
+    owner->nextHotkey_ = next;
+    owner->previousHotkey_ = previous;
+    for (auto* server : servers()) {
+        if (!server->settingsWindow_) continue;
+        SendDlgItemMessageW(server->settingsWindow_, NextHotkey, HKM_SETHOTKEY, next, 0);
+        SendDlgItemMessageW(server->settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, previous, 0);
+    }
+    return true;
+}
+
+void App::chooseTheme(bool background) {
+    static COLORREF custom[16]{};
+    auto& color = background ? background_ : foreground_;
+    CHOOSECOLORW dialog{sizeof(dialog)};
+    dialog.hwndOwner = settingsWindow_;
+    dialog.rgbResult = colorRef(color);
+    dialog.lpCustColors = custom;
+    dialog.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&dialog)) return;
+    const auto old = color;
+    color = (std::uint32_t(GetRValue(dialog.rgbResult)) << 16) |
+        (std::uint32_t(GetGValue(dialog.rgbResult)) << 8) | GetBValue(dialog.rgbResult);
+    if (!config_.host.empty() && !saveServers()) color = old;
+    discardGraphics();
+    InvalidateRect(window_, nullptr, FALSE);
+}
+
+void App::dropFiles(HDROP drop) {
+    std::vector<std::string> paths;
+    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    if (count <= 100000) {
+        for (UINT i = 0; i < count; ++i) {
+            const UINT length = DragQueryFileW(drop, i, nullptr, 0);
+            std::wstring path(length + 1, L'\0');
+            if (!DragQueryFileW(drop, i, path.data(), length + 1)) continue;
+            path.resize(length);
+            paths.push_back(encoded(path));
+        }
+    }
+    DragFinish(drop);
+    if (!paths.empty()) uploadDropped(std::move(paths));
+}
+
+void App::uploadDropped(std::vector<std::string> paths) {
+    if (transfer_.active) {
+        MessageBoxW(window_, L"当前窗口正在传输，请完成后再拖入文件。", L"AirSFTP", MB_OK);
+        return;
+    }
+    if (config_.host.empty() || config_.username.empty() || remotePath_.empty() || remotePath_.front() != '/') {
+        showSettings();
+        MessageBoxW(settingsWindow_, L"请先保存服务器连接信息和远程文件夹，然后重新拖入文件。", L"AirSFTP", MB_OK);
+        return;
+    }
+    stopTransfer();
+    const auto generation = transferGeneration_;
+    transfer_ = {};
+    transfer_.active = true;
+    transfer_.message = "Connecting";
+    transfer_.fileName = "Drop upload";
+    InvalidateRect(window_, nullptr, FALSE);
+    transferThread_ = std::jthread([this, config = config_, remote = remotePath_,
+        paths = std::move(paths), generation, previous = std::move(transferThread_)](std::stop_token token) mutable {
+        if (previous.joinable()) previous.join();
+        if (token.stop_requested()) return;
+        SshSession session(token);
+        std::string error;
+        if (!session.connect(config, error)) {
+            TransferProgress failure;
+            failure.failed = true;
+            failure.message = error;
+            postTransfer(failure, generation);
+            return;
+        }
+        session.uploadPaths(paths, remote, [this, generation](const TransferProgress& value) {
+            postTransfer(value, generation);
+        }, error);
+    });
+}

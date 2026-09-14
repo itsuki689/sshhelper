@@ -36,6 +36,7 @@ target_compile_definitions(airsftp_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_M
 add_executable(AirSFTP WIN32
   src/main.cpp
   src/app.cpp
+  src/app_servers.cpp
   src/transfer_picker.cpp
   resources/AirSFTP.rc
 )
@@ -84,5 +85,12 @@ if(MINGW)
   set_tests_properties(folder_transfer PROPERTIES TIMEOUT 15)
 
 endif()
+
+add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+target_include_directories(app_windows_test PRIVATE resources)
+target_link_libraries(app_windows_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
+set_target_properties(app_windows_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/window-test")
+add_test(NAME app_windows COMMAND app_windows_test)
+set_tests_properties(app_windows PROPERTIES TIMEOUT 15)
 
 install(TARGETS AirSFTP RUNTIME DESTINATION .)
