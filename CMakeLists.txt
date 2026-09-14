@@ -13,6 +13,7 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ENABLE_ZLIB_COMPRESSION OFF CACHE BOOL "" FORCE)
 set(ENABLE_DEBUG_LOGGING OFF CACHE BOOL "" FORCE)
 set(CRYPTO_BACKEND WinCNG CACHE STRING "" FORCE)
+set(ENABLE_UNICODE ON CACHE BOOL "Use wide Windows APIs in libssh2" FORCE)
 
 FetchContent_Declare(
   libssh2
@@ -25,6 +26,7 @@ FetchContent_MakeAvailable(libssh2)
 add_library(airsftp_core STATIC
   src/credential_store.cpp
   src/ssh_client.cpp
+  src/folder_transfer.cpp
   src/telemetry.cpp
 )
 target_include_directories(airsftp_core PUBLIC src)
@@ -34,10 +36,11 @@ target_compile_definitions(airsftp_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_M
 add_executable(AirSFTP WIN32
   src/main.cpp
   src/app.cpp
+  src/transfer_picker.cpp
   resources/AirSFTP.rc
 )
 target_include_directories(AirSFTP PRIVATE resources)
-target_link_libraries(AirSFTP PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32)
+target_link_libraries(AirSFTP PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
 
 if(MINGW)
   target_link_options(AirSFTP PRIVATE -static -static-libgcc -static-libstdc++ -municode)
@@ -49,8 +52,37 @@ target_link_libraries(telemetry_parser_test PRIVATE airsftp_core)
 add_executable(credential_store_test tests/credential_store_test.cpp)
 target_link_libraries(credential_store_test PRIVATE airsftp_core)
 
+add_executable(ssh_client_test tests/ssh_client_test.cpp)
+target_link_libraries(ssh_client_test PRIVATE airsftp_core)
+
 enable_testing()
 add_test(NAME telemetry_parser COMMAND telemetry_parser_test)
 add_test(NAME credential_store COMMAND credential_store_test)
+add_test(NAME ssh_client COMMAND ssh_client_test)
+set_tests_properties(ssh_client PROPERTIES TIMEOUT 10)
+
+if(MINGW)
+  add_executable(transfer_test tests/transfer_test.cpp)
+  target_link_libraries(transfer_test PRIVATE airsftp_core)
+  # Isolate the test-only pinned host key from the application.
+  set_target_properties(transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/transfer-test")
+  foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
+              sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle)
+    target_link_options(transfer_test PRIVATE "-Wl,--wrap=libssh2_${api}")
+  endforeach()
+  add_test(NAME transfer COMMAND transfer_test)
+  set_tests_properties(transfer PROPERTIES TIMEOUT 10)
+  add_executable(folder_transfer_test tests/folder_transfer_test.cpp)
+  target_link_libraries(folder_transfer_test PRIVATE airsftp_core)
+  set_target_properties(folder_transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/folder-test")
+  foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
+              sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle sftp_stat_ex
+              sftp_mkdir_ex sftp_last_error sftp_readdir_ex)
+    target_link_options(folder_transfer_test PRIVATE "-Wl,--wrap=libssh2_${api}")
+  endforeach()
+  add_test(NAME folder_transfer COMMAND folder_transfer_test)
+  set_tests_properties(folder_transfer PROPERTIES TIMEOUT 15)
+
+endif()
 
 install(TARGETS AirSFTP RUNTIME DESTINATION .)

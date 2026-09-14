@@ -25,6 +25,8 @@ struct TelemetrySnapshot {
     bool connected = false;
     std::string status = "Not connected";
     std::string fingerprint;
+    std::string cpuName;
+    std::string cpuPowerStrategy;
     double packageTemperature = -1.0;
     double packagePowerWatts = -1.0;
     std::vector<SensorValue> coreTemperatures;
@@ -51,6 +53,12 @@ struct ConnectionConfig {
 
 enum class TransferDirection { Upload, Download };
 
+struct TransferEntry {
+    std::string relativePath;
+    bool directory = false;
+    std::uint64_t size = 0;
+};
+
 struct TransferProgress {
     bool active = false;
     bool completed = false;
@@ -61,4 +69,6 @@ struct TransferProgress {
     std::uint64_t transferred = 0;
     std::uint64_t total = 0;
     std::uint64_t bytesPerSecond = 0;
+    std::size_t filesCompleted = 0;
+    std::size_t filesTotal = 0;
 };

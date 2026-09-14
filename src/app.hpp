@@ -56,12 +56,16 @@ private:
     void stopMonitor();
     void startTransfer(TransferDirection direction);
     void stopTransfer();
-    void postSnapshot(TelemetrySnapshot snapshot);
-    void postTransfer(TransferProgress progress);
-    void chooseLocalFile(bool saveDialog);
+    void postSnapshot(TelemetrySnapshot snapshot, std::uintptr_t generation);
+    void postTransfer(TransferProgress progress, std::uintptr_t generation);
+    void chooseLocalFolder();
 
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
+    std::mutex messageMutex_;
+    HWND messageWindow_ = nullptr;
+    std::uintptr_t monitorGeneration_ = 0;
+    std::uintptr_t transferGeneration_ = 0;
     HWND settingsWindow_ = nullptr;
     HFONT uiFont_ = nullptr;
     HFONT settingsTitleFont_ = nullptr;
@@ -106,5 +110,4 @@ private:
     std::string remotePath_;
     std::jthread monitorThread_;
     std::jthread transferThread_;
-    std::atomic_bool transferCancelled_{false};
 };

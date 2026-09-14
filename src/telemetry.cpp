@@ -60,7 +60,38 @@ double real(const std::string& value) {
 const std::string& TelemetryParser::probeScript() {
     static const std::string script = R"SH(#!/bin/sh
 LC_ALL=C
-printf 'AIR|2\n'
+printf 'AIR|3\n'
+
+cpu_name=$(awk -F: '/^model name[[:space:]]*:/ {
+  value=$0; sub(/^[^:]*:[[:space:]]*/, "", value); gsub(/\|/, "/", value); print value; exit
+}' /proc/cpuinfo 2>/dev/null)
+if [ -z "$cpu_name" ] && [ -r /proc/device-tree/model ]; then
+  cpu_name=$(tr '\000|' ' /' </proc/device-tree/model 2>/dev/null)
+fi
+
+cpu_power_strategy=lm-sensors
+case "$cpu_name" in
+  *Intel*|*Xeon*) cpu_power_strategy=intel-rapl ;;
+esac
+printf 'CPU|%s|%s\n' "$cpu_name" "$cpu_power_strategy"
+
+if [ "$cpu_power_strategy" = intel-rapl ]; then
+  for zone in \
+    /sys/class/powercap/intel-rapl:* \
+    /sys/class/powercap/intel-rapl/intel-rapl:* \
+    /sys/devices/virtual/powercap/intel-rapl/intel-rapl:*
+  do
+    [ -d "$zone" ] || continue
+    [ -r "$zone/name" ] && [ -r "$zone/energy_uj" ] || continue
+    zone_name=$(cat "$zone/name" 2>/dev/null)
+    case "$zone_name" in package-*) ;; *) continue ;; esac
+    energy=$(cat "$zone/energy_uj" 2>/dev/null)
+    max_energy=$(cat "$zone/max_energy_range_uj" 2>/dev/null)
+    [ -n "$energy" ] || continue
+    [ -n "$max_energy" ] || max_energy=0
+    printf 'RAPL|%s|%s|%s\n' "$zone_name" "$energy" "$max_energy"
+  done
+fi
 
 if command -v sensors >/dev/null 2>&1; then
   sensors -u 2>/dev/null | awk '
@@ -115,14 +146,22 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
     snapshot.sshLatencyMs = latencyMs;
     snapshot.sampledAt = std::chrono::system_clock::now();
 
+    bool hasNetwork = false;
+    std::string networkInterface;
     std::uint64_t rx = 0;
     std::uint64_t tx = 0;
+    std::unordered_map<std::string, RaplReading> raplReadings;
     std::stringstream input(text);
     std::string line;
     while (std::getline(input, line)) {
         auto parts = split(line, '|');
         if (parts.empty()) continue;
-        if (parts[0] == "TEMP" && parts.size() >= 4) {
+        if (parts[0] == "CPU" && parts.size() >= 3) {
+            snapshot.cpuName = parts[1];
+            snapshot.cpuPowerStrategy = parts[2];
+        } else if (parts[0] == "RAPL" && parts.size() >= 4) {
+            raplReadings[parts[1]] = {u64(parts[2]), u64(parts[3])};
+        } else if (parts[0] == "TEMP" && parts.size() >= 4) {
             const auto labelLower = lower(parts[2]);
             const double value = real(parts[3]);
             if (value < -100.0 || value > 250.0) continue;
@@ -185,8 +224,12 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
             snapshot.diskUsed = u64(parts[2]);
             snapshot.diskTotal = u64(parts[3]);
         } else if (parts[0] == "NET" && parts.size() >= 4) {
-            rx = u64(parts[2]);
-            tx = u64(parts[3]);
+            auto readCounter = [](const std::string& text, std::uint64_t& value) {
+                const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+                return ec == std::errc{} && end == text.data() + text.size();
+            };
+            hasNetwork = !parts[1].empty() && readCounter(parts[2], rx) && readCounter(parts[3], tx);
+            networkInterface = parts[1];
         } else if (parts[0] == "GPU" && parts.size() >= 2) {
             auto fields = split(line.substr(4), ',');
             if (fields.size() >= 6) {
@@ -203,7 +246,39 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (previousNetworkSample_.time_since_epoch().count() != 0 && rx >= previousRx_ && tx >= previousTx_) {
+    if (!raplReadings.empty()) {
+        if (previousRaplSample_.time_since_epoch().count() != 0) {
+            const double seconds = std::chrono::duration<double>(now - previousRaplSample_).count();
+            double totalWatts = 0.0;
+            bool hasPower = false;
+            if (seconds > 0.0) {
+                for (const auto& [zone, current] : raplReadings) {
+                    const auto previous = previousRaplReadings_.find(zone);
+                    if (previous == previousRaplReadings_.end()) continue;
+
+                    std::uint64_t delta = 0;
+                    if (current.energyMicrojoules >= previous->second.energyMicrojoules) {
+                        delta = current.energyMicrojoules - previous->second.energyMicrojoules;
+                    } else {
+                        const auto range = current.maxEnergyRangeMicrojoules != 0
+                            ? current.maxEnergyRangeMicrojoules
+                            : previous->second.maxEnergyRangeMicrojoules;
+                        if (range <= previous->second.energyMicrojoules) continue;
+                        delta = range - previous->second.energyMicrojoules + current.energyMicrojoules;
+                    }
+                    totalWatts += static_cast<double>(delta) / 1'000'000.0 / seconds;
+                    hasPower = true;
+                }
+            }
+            if (hasPower && totalWatts >= 0.0 && totalWatts <= 10000.0)
+                snapshot.packagePowerWatts = totalWatts;
+        }
+        previousRaplReadings_ = std::move(raplReadings);
+        previousRaplSample_ = now;
+    }
+
+    if (hasNetwork && networkInterface == previousInterface_ &&
+        previousNetworkSample_.time_since_epoch().count() != 0 && rx >= previousRx_ && tx >= previousTx_) {
         const double seconds = std::chrono::duration<double>(now - previousNetworkSample_).count();
         if (seconds > 0.0) {
             snapshot.networkDown = static_cast<std::uint64_t>((rx - previousRx_) / seconds);
@@ -212,6 +287,7 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
     }
     previousRx_ = rx;
     previousTx_ = tx;
-    previousNetworkSample_ = now;
+    previousInterface_ = hasNetwork ? networkInterface : std::string{};
+    previousNetworkSample_ = hasNetwork ? now : std::chrono::steady_clock::time_point{};
     return snapshot;
 }

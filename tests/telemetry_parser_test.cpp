@@ -14,7 +14,8 @@
 int main() {
     TelemetryParser parser;
     const std::string first =
-        "AIR|2\n"
+        "AIR|3\n"
+        "CPU|Intel(R) Xeon(R) CPU E5-2667 v3 @ 3.20GHz|intel-rapl\n"
         "TEMP|coretemp-isa-0000|Package id 0|52.000\n"
         "TEMP|coretemp-isa-0000|Core 0|48.000\n"
         "TEMP|coretemp-isa-0000|Core 1|49.000\n"
@@ -28,6 +29,8 @@ int main() {
         "END|1\n";
     auto snapshot = parser.parse(first, 12.5);
     CHECK(snapshot.connected);
+    CHECK(snapshot.cpuName == "Intel(R) Xeon(R) CPU E5-2667 v3 @ 3.20GHz");
+    CHECK(snapshot.cpuPowerStrategy == "intel-rapl");
     CHECK(snapshot.packageTemperature == 52.0);
     CHECK(snapshot.packagePowerWatts == 64.25);
     CHECK(snapshot.coreTemperatures.size() == 2);
@@ -47,6 +50,49 @@ int main() {
     auto next = parser.parse(second, 10.0);
     CHECK(next.networkDown > 0);
     CHECK(next.networkUp > 0);
+
+    // Missing/malformed samples and interface changes must reset the baseline.
+    TelemetryParser networkParser;
+    networkParser.parse("NET|eth0|1000000|2000000\n", 1.0);
+    networkParser.parse("AIR|3\nEND|1\n", 1.0);
+    auto recovered = networkParser.parse("NET|eth0|1000000|2000000\n", 1.0);
+    CHECK(recovered.networkDown == 0 && recovered.networkUp == 0);
+    auto switched = networkParser.parse("NET|wlan0|900000000|900000000\n", 1.0);
+    CHECK(switched.networkDown == 0 && switched.networkUp == 0);
+    auto reset = networkParser.parse("NET|wlan0|10|20\n", 1.0);
+    CHECK(reset.networkDown == 0 && reset.networkUp == 0);
+    networkParser.parse("NET|wlan0|invalid|30\n", 1.0);
+    auto afterInvalid = networkParser.parse("NET|wlan0|1000|2000\n", 1.0);
+    CHECK(afterInvalid.networkDown == 0 && afterInvalid.networkUp == 0);
+    networkParser.parse("NET|wlan0|-1|2000\n", 1.0);
+    auto afterNegative = networkParser.parse("NET|wlan0|2000|3000\n", 1.0);
+    CHECK(afterNegative.networkDown == 0 && afterNegative.networkUp == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto active = networkParser.parse("NET|wlan0|4000|6000\n", 1.0);
+    CHECK(active.networkDown > 0 && active.networkUp > 0);
+
+    TelemetryParser raplParser;
+    const auto raplWarmup = raplParser.parse(
+        "AIR|3\nCPU|Intel(R) Xeon(R) CPU E5-2667 v3 @ 3.20GHz|intel-rapl\n"
+        "RAPL|package-0|1000000|10000000\nRAPL|package-1|2000000|10000000\nEND|1\n", 5.0);
+    CHECK(raplWarmup.packagePowerWatts < 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto rapl = raplParser.parse(
+        "AIR|3\nCPU|Intel(R) Xeon(R) CPU E5-2667 v3 @ 3.20GHz|intel-rapl\n"
+        "RAPL|package-0|1500000|10000000\nRAPL|package-1|2500000|10000000\nEND|1\n", 5.0);
+    CHECK(rapl.packagePowerWatts > 0.0);
+    CHECK(rapl.packagePowerWatts < 100.0);
+
+    TelemetryParser wrapParser;
+    wrapParser.parse(
+        "AIR|3\nCPU|Intel(R) Xeon(R) CPU E5-2667 v3|intel-rapl\n"
+        "RAPL|package-0|9900000|10000000\nEND|1\n", 5.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto wrapped = wrapParser.parse(
+        "AIR|3\nCPU|Intel(R) Xeon(R) CPU E5-2667 v3|intel-rapl\n"
+        "RAPL|package-0|100000|10000000\nEND|1\n", 5.0);
+    CHECK(wrapped.packagePowerWatts > 0.0);
+    CHECK(wrapped.packagePowerWatts < 20.0);
 
     TelemetryParser amdParser;
     const auto amd = amdParser.parse(

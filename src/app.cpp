@@ -4,6 +4,8 @@
 #include "resource.h"
 #include "ssh_client.hpp"
 #include "telemetry.hpp"
+#include "transfer_picker.hpp"
+#include <shobjidl.h>
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -38,7 +40,7 @@ constexpr UINT_PTR AnimationTimerId = 1;
 constexpr UINT AnimationFrameMs = 15;
 constexpr ULONGLONG AnimationDurationMs = 180;
 constexpr int SettingsWidth = 480;
-constexpr int SettingsHeight = 456;
+constexpr int SettingsHeight = 488;
 constexpr int SettingsHeaderHeight = 52;
 
 int pixels(int dips, UINT dpi) {
@@ -51,7 +53,8 @@ int dips(int value, UINT dpi) {
 
 enum ControlId {
     HostEdit = 2001, PortEdit, UserEdit, PasswordEdit, KeyEdit,
-    LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton
+    LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton,
+    EntireFolder, SelectedFiles
 };
 
 template <typename T> void release(T*& value) {
@@ -193,6 +196,8 @@ App::App(HINSTANCE instance) : instance_(instance) {
 App::~App() {
     stopTransfer();
     stopMonitor();
+    if (transferThread_.joinable()) transferThread_.join();
+    if (monitorThread_.joinable()) monitorThread_.join();
     discardGraphics();
     release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_);
     release(writeFactory_); release(d2dFactory_);
@@ -209,6 +214,8 @@ int App::run(int showCommand) {
     if (!registerClasses() || !createMainWindow(showCommand)) return 1;
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (settingsWindow_ && IsWindowVisible(settingsWindow_) && IsDialogMessageW(settingsWindow_, &message))
+            continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -251,6 +258,7 @@ bool App::createMainWindow(int showCommand) {
         WS_POPUP, work.right - width - margin, work.bottom - height - margin,
         width, height, nullptr, nullptr, instance_, this);
     if (!window_) return false;
+    messageWindow_ = window_;
     constexpr DWORD roundPreference = 2;
     constexpr auto cornerAttribute = static_cast<DWMWINDOWATTRIBUTE>(33);
     DwmSetWindowAttribute(window_, cornerAttribute, &roundPreference, sizeof(roundPreference));
@@ -291,6 +299,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         if (animating_) finishWindowAnimation();
         const auto* suggested = reinterpret_cast<const RECT*>(lParam);
         const UINT dpi = HIWORD(wParam);
+        if (renderTarget_) renderTarget_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
         const int width = pixels(collapseMode_ == CollapseMode::Side ? SideWidth :
             (collapseMode_ == CollapseMode::Horizontal ? CompactWidth : MainWidth), dpi);
         const int height = pixels(collapseMode_ == CollapseMode::Side ? SideHeight :
@@ -391,21 +400,38 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     }
     case SnapshotMessage: {
         std::unique_ptr<TelemetrySnapshot> value(reinterpret_cast<TelemetrySnapshot*>(lParam));
+        if (wParam != monitorGeneration_) return 0;
         snapshot_ = std::move(*value);
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
     case TransferMessage: {
         std::unique_ptr<TransferProgress> value(reinterpret_cast<TransferProgress*>(lParam));
+        if (wParam != transferGeneration_) return 0;
         transfer_ = std::move(*value);
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
-    case WM_DESTROY:
+    case WM_DESTROY: {
+        stopMonitor();
+        stopTransfer();
+        {
+            std::lock_guard lock(messageMutex_);
+            messageWindow_ = nullptr;
+        }
+        // No producer can post now; release payloads already queued for this HWND.
+        MSG pending{};
+        while (PeekMessageW(&pending, window, SnapshotMessage, TransferMessage, PM_REMOVE)) {
+            if (pending.message == SnapshotMessage)
+                delete reinterpret_cast<TelemetrySnapshot*>(pending.lParam);
+            else
+                delete reinterpret_cast<TransferProgress*>(pending.lParam);
+        }
         KillTimer(window_, AnimationTimerId);
         window_ = nullptr;
         PostQuitMessage(0);
         return 0;
+    }
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
@@ -417,6 +443,8 @@ bool App::ensureGraphics() {
     d2dFactory_->CreateHwndRenderTarget(D2D1::RenderTargetProperties(),
         D2D1::HwndRenderTargetProperties(window_, D2D1::SizeU(rect.right, rect.bottom)), &renderTarget_);
     if (!renderTarget_) return false;
+    const auto dpi = static_cast<float>(GetDpiForWindow(window_));
+    renderTarget_->SetDpi(dpi, dpi);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x1D1D1F), &textBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x74747B), &mutedBrush_);
     renderTarget_->CreateSolidColorBrush(D2D1::ColorF(0x087FF5), &accentBrush_);
@@ -582,8 +610,9 @@ void App::paint() {
         drawText(renderTarget_, titleFormat_, textBrush_, L"↑ " + humanBytes(snapshot_.networkUp, true), D2D1::RectF(198, 204, 360, 232));
 
         if (transfer_.active || transfer_.completed || transfer_.failed) {
-            const float progressValue = ratio(transfer_.transferred, transfer_.total);
-            drawText(renderTarget_, labelFormat_, textBrush_, wide(transfer_.fileName), D2D1::RectF(18, 236, 210, 253));
+            const float progressValue = transfer_.completed ? 1.0f : ratio(transfer_.transferred, transfer_.total);
+            drawText(renderTarget_, labelFormat_, textBrush_, wide((transfer_.filesTotal ? std::to_string(transfer_.filesCompleted) + "/" +
+                std::to_string(transfer_.filesTotal) + " " : "") + transfer_.fileName), D2D1::RectF(18, 236, 210, 253));
             drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? humanBytes(transfer_.bytesPerSecond, true) : wide(transfer_.message), D2D1::RectF(220, 236, 360, 253));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 362, 263), 3, 3), lineBrush_);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 18 + 344 * progressValue, 263), 3, 3), accentBrush_);
@@ -906,6 +935,9 @@ void App::rebuildSettingsFonts(UINT dpi) {
         for (int id : buttons)
             SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
                 reinterpret_cast<WPARAM>(settingsButtonFont_), TRUE);
+        for (int id : {EntireFolder, SelectedFiles})
+            SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
+                reinterpret_cast<WPARAM>(uiFont_), TRUE);
     }
     if (oldUi) DeleteObject(oldUi);
     if (oldTitle) DeleteObject(oldTitle);
@@ -927,9 +959,11 @@ void App::layoutSettings(UINT dpi) {
     move(LocalEdit, 34, 274, 326, 22);
     move(BrowseLocal, 380, 268, 76, 34);
     move(RemoteEdit, 34, 336, 412, 22);
-    move(SaveConnect, 162, 401, 126, 38);
-    move(UploadButton, 296, 401, 76, 38);
-    move(DownloadButton, 380, 401, 76, 38);
+    move(EntireFolder, 24, 371, 170, 24);
+    move(SelectedFiles, 210, 371, 220, 24);
+    move(SaveConnect, 162, 433, 126, 38);
+    move(UploadButton, 296, 433, 76, 38);
+    move(DownloadButton, 380, 433, 76, 38);
 
     constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit};
     for (int id : edits) {
@@ -1004,12 +1038,12 @@ void App::paintSettings() {
     label(L"用户名", 24, 123, 176);
     label(L"密码 / 密钥口令", 212, 123, 244);
     label(L"私钥文件（可选）", 24, 185, 432);
-    label(L"本地文件", 24, 247, 346);
-    label(L"远程文件", 24, 309, 432);
+    label(L"本地文件夹", 24, 247, 346);
+    label(L"远程文件夹", 24, 309, 432);
 
     SetTextColor(buffer, RGB(142, 142, 147));
-    RECT note{p(24), p(371), p(456), p(393)};
-    DrawTextW(buffer, L"密码由 Windows DPAPI 加密 · 仅当前用户可解密", -1, &note,
+    RECT note{p(24), p(401), p(456), p(425)};
+    DrawTextW(buffer, L"保留子目录结构 · 同名文件覆盖 · 不跟随符号链接", -1, &note,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     SelectObject(buffer, oldFont);
@@ -1089,13 +1123,19 @@ void App::createSettingsWindow() {
     addControl(settingsWindow_, WC_BUTTONW, L"上传", BS_OWNERDRAW, 0, 0, 1, 1, UploadButton, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"下载", BS_OWNERDRAW, 0, 0, 1, 1, DownloadButton, settingsButtonFont_);
 
+    addControl(settingsWindow_, WC_BUTTONW, L"整个文件夹", WS_GROUP | BS_AUTORADIOBUTTON,
+        0, 0, 1, 1, EntireFolder, uiFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"选择部分文件 / 子目录", BS_AUTORADIOBUTTON,
+        0, 0, 1, 1, SelectedFiles, uiFont_);
+    SendDlgItemMessageW(settingsWindow_, EntireFolder, BM_SETCHECK, BST_CHECKED, 0);
+
     SendMessageW(host, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.1.10"));
     SendMessageW(port, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"22"));
     SendMessageW(user, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"root"));
     SendMessageW(password, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"密码或私钥口令"));
     SendMessageW(key, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"可选：私钥文件路径"));
-    SendMessageW(local, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"选择本地文件"));
-    SendMessageW(remote, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"/tmp/file"));
+    SendMessageW(local, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"选择本地文件夹"));
+    SendMessageW(remote, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"/tmp/"));
     layoutSettings(dpi);
 }
 void App::showSettings() {
@@ -1188,7 +1228,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case BrowseLocal: chooseLocalFile(false); return 0;
+        case BrowseLocal: chooseLocalFolder(); return 0;
         case SaveConnect: {
             ConnectionConfig config; std::string local, remote;
             if (readSettings(config, local, remote)) {
@@ -1230,41 +1270,65 @@ void App::rememberConnection(const ConnectionConfig& config) {
         MessageBoxW(settingsWindow_, wide(error).c_str(), L"AirSFTP 凭据保存失败", MB_OK | MB_ICONWARNING);
 }
 
-void App::chooseLocalFile(bool saveDialog) {
-    wchar_t path[MAX_PATH]{};
-    OPENFILENAMEW dialog{sizeof(dialog)};
-    dialog.hwndOwner = settingsWindow_;
-    dialog.lpstrFile = path;
-    dialog.nMaxFile = MAX_PATH;
-    dialog.lpstrFilter = L"所有文件\0*.*\0";
-    dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | (saveDialog ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-    if ((saveDialog ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog)))
-        SetWindowTextW(GetDlgItem(settingsWindow_, LocalEdit), path);
+void App::chooseLocalFolder() {
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) return;
+    DWORD options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dialog->SetTitle(L"选择本地文件夹");
+    const auto current = controlText(settingsWindow_, LocalEdit);
+    IShellItem* initial = nullptr;
+    if (!current.empty() && SUCCEEDED(SHCreateItemFromParsingName(current.c_str(), nullptr, IID_PPV_ARGS(&initial)))) {
+        dialog->SetFolder(initial);
+        initial->Release();
+    }
+    if (SUCCEEDED(dialog->Show(settingsWindow_))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                SetWindowTextW(GetDlgItem(settingsWindow_, LocalEdit), path);
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dialog->Release();
 }
 
-void App::postSnapshot(TelemetrySnapshot snapshot) {
-    auto* value = new TelemetrySnapshot(std::move(snapshot));
-    if (!window_ || !PostMessageW(window_, SnapshotMessage, 0, reinterpret_cast<LPARAM>(value))) delete value;
+void App::postSnapshot(TelemetrySnapshot snapshot, std::uintptr_t generation) {
+    auto value = std::make_unique<TelemetrySnapshot>(std::move(snapshot));
+    std::lock_guard lock(messageMutex_);
+    if (messageWindow_ && PostMessageW(messageWindow_, SnapshotMessage, generation,
+        reinterpret_cast<LPARAM>(value.get()))) value.release();
 }
 
-void App::postTransfer(TransferProgress progress) {
-    auto* value = new TransferProgress(std::move(progress));
-    if (!window_ || !PostMessageW(window_, TransferMessage, 0, reinterpret_cast<LPARAM>(value))) delete value;
+void App::postTransfer(TransferProgress progress, std::uintptr_t generation) {
+    auto value = std::make_unique<TransferProgress>(std::move(progress));
+    std::lock_guard lock(messageMutex_);
+    if (messageWindow_ && PostMessageW(messageWindow_, TransferMessage, generation,
+        reinterpret_cast<LPARAM>(value.get()))) value.release();
 }
 
 void App::startMonitor(const ConnectionConfig& config) {
     stopMonitor();
+    const auto generation = monitorGeneration_;
     TelemetrySnapshot connecting;
     connecting.status = "Connecting";
-    postSnapshot(connecting);
-    monitorThread_ = std::jthread([this, config](std::stop_token token) {
-        TelemetryParser parser;
+    postSnapshot(connecting, generation);
+    // Join the cancelled predecessor on the replacement worker, never in a UI handler.
+    monitorThread_ = std::jthread([this, config, generation,
+        previous = std::move(monitorThread_)](std::stop_token token) mutable {
+        if (previous.joinable()) previous.join();
         while (!token.stop_requested()) {
-            SshSession session;
+            SshSession session(token);
+            TelemetryParser parser; // Reconnects must not reuse counters from an old boot.
             std::string error;
             if (!session.connect(config, error)) {
                 TelemetrySnapshot failed; failed.status = error;
-                postSnapshot(std::move(failed));
+                postSnapshot(std::move(failed), generation);
                 sleepStopped(token, std::chrono::seconds(3));
                 continue;
             }
@@ -1272,12 +1336,12 @@ void App::startMonitor(const ConnectionConfig& config) {
                 std::string output; double latency = 0.0;
                 if (!session.executeScript(TelemetryParser::probeScript(), output, latency, error)) {
                     TelemetrySnapshot failed; failed.status = error;
-                    postSnapshot(std::move(failed));
+                    postSnapshot(std::move(failed), generation);
                     break;
                 }
                 auto value = parser.parse(output, latency);
                 value.fingerprint = session.fingerprint();
-                postSnapshot(std::move(value));
+                postSnapshot(std::move(value), generation);
                 sleepStopped(token, std::chrono::seconds(2));
             }
             session.disconnect();
@@ -1287,40 +1351,56 @@ void App::startMonitor(const ConnectionConfig& config) {
 }
 
 void App::stopMonitor() {
-    if (monitorThread_.joinable()) {
-        monitorThread_.request_stop();
-        monitorThread_.join();
-    }
+    ++monitorGeneration_;
+    if (monitorThread_.joinable()) monitorThread_.request_stop();
 }
 
 void App::startTransfer(TransferDirection direction) {
     ConnectionConfig config; std::string local, remote;
     if (!readSettings(config, local, remote)) return;
     if (local.empty() || remote.empty()) {
-        MessageBoxW(settingsWindow_, L"请填写本地和远程文件路径。", L"AirSFTP", MB_OK | MB_ICONWARNING);
+        MessageBoxW(settingsWindow_, L"请填写本地和远程文件夹路径。", L"AirSFTP", MB_OK | MB_ICONWARNING);
         return;
+    }
+    if (!std::filesystem::u8path(local).is_absolute() || remote.front() != '/') {
+        MessageBoxW(settingsWindow_, L"请使用完整文件夹路径，例如 D:\\data 和 /home/user/data。",
+                    L"AirSFTP", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    std::optional<std::vector<std::string>> selection;
+    if (SendDlgItemMessageW(settingsWindow_, SelectedFiles, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        selection.emplace();
+        if (!chooseTransferEntries(settingsWindow_, config, direction,
+            direction == TransferDirection::Upload ? local : remote, *selection)) return;
     }
     config_ = config; localPath_ = local; remotePath_ = remote;
     rememberConnection(config_);
     startMonitor(config_);
     stopTransfer();
-    transferCancelled_.store(false);
+    const auto generation = transferGeneration_;
     ShowWindow(settingsWindow_, SW_HIDE);
-    transferThread_ = std::jthread([this, config, local, remote, direction](std::stop_token) {
-        SshSession session;
+    transferThread_ = std::jthread([this, config, local, remote, direction, generation, selection,
+        previous = std::move(transferThread_)](std::stop_token token) mutable {
+        // Prevent two successive transfers from writing the same destination concurrently.
+        if (previous.joinable()) previous.join();
+        if (token.stop_requested()) return;
+        SshSession session(token);
         std::string error;
         TransferProgress state; state.active = true; state.direction = direction;
-        state.fileName = std::filesystem::u8path(direction == TransferDirection::Upload ? local : remote).filename().string();
-        state.message = "Connecting"; postTransfer(state);
+        const auto& path = direction == TransferDirection::Upload ? local : remote;
+        state.fileName = path.substr(path.find_last_of("/\\") + 1);
+        state.message = "Connecting"; postTransfer(state, generation);
         if (!session.connect(config, error)) {
-            state.active = false; state.failed = true; state.message = error; postTransfer(state); return;
+            state.active = false; state.failed = true; state.message = error;
+            postTransfer(state, generation);
+            return;
         }
-        session.transfer(direction, local, remote,
-            [this](const TransferProgress& value) { postTransfer(value); }, transferCancelled_, error);
+        session.transferFolder(direction, local, remote, selection,
+            [this, generation](const TransferProgress& value) { postTransfer(value, generation); }, error);
     });
 }
 
 void App::stopTransfer() {
-    transferCancelled_.store(true);
-    if (transferThread_.joinable()) transferThread_.join();
+    ++transferGeneration_;
+    if (transferThread_.joinable()) transferThread_.request_stop();
 }
