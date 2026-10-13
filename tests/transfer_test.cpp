@@ -1,152 +1,92 @@
-#include "ssh_client.hpp"
-#include <winsock2.h>
-#include <windows.h>
-#include <libssh2.h>
-#include <libssh2_sftp.h>
-
-#include <algorithm>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <iterator>
-
-// Linker wrappers inject server failures while exercising the real transfer/file code.
-namespace {
-enum class Fault { None, Init, Open, Read, Write, ZeroWrite, Close, Size, Shutdown };
-Fault fault = Fault::None;
-std::string uploaded;
-const std::string payload(100003, 'x');
-std::size_t offset = 0;
-int opaqueSftp, opaqueHandle;
-}
-extern "C" {
-int __wrap_libssh2_session_handshake(LIBSSH2_SESSION*, libssh2_socket_t) { return 0; }
-const char* __wrap_libssh2_hostkey_hash(LIBSSH2_SESSION*, int) {
-    static const char hash[32] = "transfer-test-only";
-    return hash;
-}
-int __wrap_libssh2_userauth_password_ex(LIBSSH2_SESSION*, const char*, unsigned int,
-    const char*, unsigned int, LIBSSH2_PASSWD_CHANGEREQ_FUNC(*)) { return 0; }
-LIBSSH2_SFTP* __wrap_libssh2_sftp_init(LIBSSH2_SESSION*) {
-    return fault == Fault::Init ? nullptr : reinterpret_cast<LIBSSH2_SFTP*>(&opaqueSftp);
-}
-int __wrap_libssh2_sftp_shutdown(LIBSSH2_SFTP*) { return fault == Fault::Shutdown ? -1 : 0; }
-LIBSSH2_SFTP_HANDLE* __wrap_libssh2_sftp_open_ex(LIBSSH2_SFTP*, const char*, unsigned int,
-    unsigned long, long, int) {
-    offset = 0;
-    uploaded.clear();
-    return fault == Fault::Open ? nullptr : reinterpret_cast<LIBSSH2_SFTP_HANDLE*>(&opaqueHandle);
-}
-int __wrap_libssh2_sftp_fstat_ex(LIBSSH2_SFTP_HANDLE*, LIBSSH2_SFTP_ATTRIBUTES* attrs, int) {
-    attrs->flags = LIBSSH2_SFTP_ATTR_SIZE;
-    attrs->filesize = payload.size() + (fault == Fault::Size ? 1 : 0);
-    return 0;
-}
-ssize_t __wrap_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE*, char* buffer, size_t capacity) {
-    if (fault == Fault::Read) return -1;
-    const auto count = std::min(capacity, payload.size() - offset);
-    std::memcpy(buffer, payload.data() + offset, count);
-    offset += count;
-    return static_cast<ssize_t>(count);
-}
-ssize_t __wrap_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE*, const char* buffer, size_t count) {
-    if (fault == Fault::Write) return -1;
-    if (fault == Fault::ZeroWrite) return 0;
-    count = std::min(count, std::size_t{997}); // Force short writes.
-    uploaded.append(buffer, count);
-    return static_cast<ssize_t>(count);
-}
-int __wrap_libssh2_sftp_close_handle(LIBSSH2_SFTP_HANDLE*) { return fault == Fault::Close ? -1 : 0; }
-}
-
-#define CHECK(condition) do { if (!(condition)) { \
-    std::cerr << "check failed at line " << __LINE__ << ": " #condition "\n"; \
-    return __LINE__; } } while (false)
-
+#include "mock_sftp.hpp"
+#define CHECK(c) do { if (!(c)) { std::cerr << "Line " << __LINE__ << ": " #c "\n" << error << "\n"; return __LINE__; } } while(false)
 int runTests() {
-    // Only a TCP accept queue is needed: SSH authentication and SFTP are wrapped.
-    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    CHECK(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
-    CHECK(listen(listener, 1) == 0);
-    int addressSize = sizeof(address);
-    getsockname(listener, reinterpret_cast<sockaddr*>(&address), &addressSize);
-    std::stop_source stop;
-    SshSession session(stop.get_token(), 1000);
-    ConnectionConfig config;
-    config.host = "127.0.0.1";
-    config.port = ntohs(address.sin_port);
-    config.username = "test";
-    config.password = "test";
+    namespace fs = std::filesystem;
     std::string error;
-    CHECK(session.connect(config, error));
-    closesocket(listener);
-
-    const auto base = std::filesystem::temp_directory_path() /
-        ("airsftp-transfer-test-" + std::to_string(GetCurrentProcessId()));
-    const auto source = std::filesystem::path(base.string() + "-source.bin");
-    const auto destination = std::filesystem::path(base.string() + "-destination.bin");
-    struct Cleanup {
-        std::filesystem::path source, destination;
-        ~Cleanup() { std::error_code error; std::filesystem::remove(source, error); std::filesystem::remove(destination, error); }
-    } cleanup{source, destination};
-    { std::ofstream file(source, std::ios::binary); file << payload; CHECK(file.good()); }
-    auto utf8 = [](const std::filesystem::path& path) {
-        const auto text = path.u8string();
-        return std::string(text.begin(), text.end());
-    };
+    const auto root = fs::temp_directory_path() / ("airsftp-resume-" + std::to_string(GetCurrentProcessId()));
+    CHECK(!fs::exists(root)); fs::create_directory(root);
+    struct Cleanup { fs::path p; ~Cleanup() { std::error_code e; fs::remove_all(p,e); } } cleanup{root};
+    auto encoded = [](const fs::path& p) { auto text=p.generic_u8string(); return std::string(text.begin(),text.end()); };
+    auto read = [](const fs::path& p) { std::ifstream file(p,std::ios::binary); return std::string(std::istreambuf_iterator<char>(file),{}); };
+    auto write = [](const fs::path& p,const std::string& data) { std::ofstream(p,std::ios::binary|std::ios::trunc)<<data; };
+    std::string payload(2*1024*1024+19,'x');
+    for (std::size_t i=0;i<payload.size();++i) payload[i]=char((i*17)%251);
+    const auto source=root/"source.bin", destination=root/"target.bin";
+    write(source,payload); write(destination,"old-local");
+    remoteFiles["/target"]={LIBSSH2_SFTP_S_IFREG,"old-remote"};
+    SOCKET listener=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    sockaddr_in address{};address.sin_family=AF_INET;address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    CHECK(bind(listener,reinterpret_cast<sockaddr*>(&address),sizeof(address))==0);
+    CHECK(listen(listener,4)==0);
+    int length=sizeof(address);getsockname(listener,reinterpret_cast<sockaddr*>(&address),&length);
+    ConnectionConfig config;config.host="127.0.0.1";config.port=ntohs(address.sin_port);config.username="test";
+    std::stop_source stop;
+    SshSession session(stop.get_token());
+    CHECK(session.connect(config,error));
     TransferProgress final;
-    auto run = [&](TransferDirection direction, Fault injected) {
-        fault = injected;
-        final = {};
-        return session.transfer(direction, utf8(direction == TransferDirection::Upload ? source : destination),
-            "/test", [&](const TransferProgress& state) { final = state; }, error);
-    };
-    CHECK(run(TransferDirection::Upload, Fault::None));
-    CHECK(final.completed && !final.failed && final.transferred == payload.size());
-    CHECK(uploaded == payload);
-    CHECK(run(TransferDirection::Download, Fault::None));
-    CHECK(final.completed && !final.failed && final.transferred == payload.size());
-    {
-        std::ifstream file(destination, std::ios::binary);
-        CHECK(std::string(std::istreambuf_iterator<char>(file), {}) == payload);
+    auto progress=[&](const TransferProgress& p){final=p;};
+    auto upload=[&]{return session.transfer(TransferDirection::Upload,encoded(source),"/target",progress,error);};
+    auto download=[&]{return session.transfer(TransferDirection::Download,encoded(destination),"/target",progress,error);};
+    failWriteAfter=100003;bytesWritten=0;
+    CHECK(!upload());
+    CHECK(remoteFiles.at("/target").data=="old-remote" && final.failed);
+    std::string remotePart;
+    for(auto& [path,node]:remoteFiles) if(path.ends_with(".part")) remotePart=path;
+    CHECK(!remotePart.empty() && remoteFiles.at(remotePart).data.size()==100003);
+    failWriteAfter=SIZE_MAX;bytesWritten=0;
+    CHECK(upload());
+    CHECK(final.resumedBytes==100003 && bytesWritten==payload.size()-100003);
+    CHECK(remoteFiles.at("/target").data==payload && !remoteFiles.contains(remotePart));
+    failReadAfter=100003;bytesRead=0;
+    CHECK(!download());
+    CHECK(read(destination)=="old-local" && final.failed);
+    fs::path localPart;
+    for(auto& entry:fs::directory_iterator(root)) if(entry.path().extension()==".part") localPart=entry.path();
+    CHECK(!localPart.empty() && fs::file_size(localPart)==100003);
+    failReadAfter=SIZE_MAX;bytesRead=0;
+    CHECK(download());
+    CHECK(final.resumedBytes==100003 && read(destination)==payload && !fs::exists(localPart));
+    // Corrupted partial data must restart, not contaminate the final target.
+    remoteFiles[remotePart]={LIBSSH2_SFTP_S_IFREG,std::string(500,'z')};
+    CHECK(upload() && final.resumedBytes==0 && remoteFiles.at("/target").data==payload);
+    write(localPart,std::string(500,'z'));
+    CHECK(download() && final.resumedBytes==0 && read(destination)==payload);
+    // Atomic rename failure preserves both the original final and complete temporary.
+    remoteFiles["/target"].data="old-remote";failRename=true;
+    CHECK(!upload() && remoteFiles.at("/target").data=="old-remote");
+    CHECK(remoteFiles.at(remotePart).data==payload);
+    failRename=false;
+    CHECK(upload() && final.resumedBytes==payload.size());
+    for (auto* fault : {&failInit,&failOpen,&failWrite,&zeroWrite,&failFlush,&failClose}) {
+        remoteFiles.erase(remotePart);remoteFiles["/target"].data="old-remote";
+        *fault=true;
+        CHECK(!upload());
+        CHECK(final.failed && remoteFiles.at("/target").data=="old-remote");
+        *fault=false;
     }
-    for (const auto direction : {TransferDirection::Upload, TransferDirection::Download}) {
-        for (const auto injected : {Fault::Init, Fault::Open, Fault::Close, Fault::Shutdown}) {
-            CHECK(!run(direction, injected));
-            CHECK(final.failed && !final.completed && !final.active && !error.empty());
-        }
+    remoteFiles["/target"].data=payload;
+    for(auto* fault : {&failInit,&failOpen,&failRead,&failClose}) {
+        fs::remove(localPart);write(destination,"old-local");*fault=true;
+        CHECK(!download() && read(destination)=="old-local");
+        *fault=false;
     }
-    for (const auto injected : {Fault::Write, Fault::ZeroWrite}) {
-        CHECK(!run(TransferDirection::Upload, injected));
-        CHECK(final.failed && !final.completed);
-    }
-    for (const auto injected : {Fault::Read, Fault::Size}) {
-        CHECK(!run(TransferDirection::Download, injected));
-        CHECK(final.failed && !final.completed);
-    }
-    fault = Fault::None;
-    CHECK(!session.transfer(TransferDirection::Upload, utf8(source) + ".missing", "/test",
-        [&](const TransferProgress& state) { final = state; }, error));
-    CHECK(final.failed && !final.completed);
-    CHECK(!session.transfer(TransferDirection::Download, utf8(destination / "missing/file"), "/test",
-        [&](const TransferProgress& state) { final = state; }, error));
-    CHECK(final.failed && !final.completed);
-    CHECK(!session.transfer(TransferDirection::Upload, utf8(source), "/test",
-        [&](const TransferProgress& state) { final = state; if (state.active) stop.request_stop(); }, error));
-    CHECK(final.failed && !final.completed && error == "Transfer cancelled");
-    std::cout << "Transfer success, short writes, cancellation and injected failures: OK\n";
+    // Replacement blocked by a reader: final survives and complete .part remains retryable.
+    fs::remove(localPart);write(destination,"old-local");
+    HANDLE held=CreateFileW(destination.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
+    CHECK(held!=INVALID_HANDLE_VALUE);
+    CHECK(!download() && read(destination)=="old-local" && fs::file_size(localPart)==payload.size());
+    CloseHandle(held);
+    CHECK(download() && final.resumedBytes==payload.size());
+    CHECK(!session.transfer(TransferDirection::Upload,encoded(root/"missing"),"/missing",progress,error));
+    CHECK(!remoteFiles.contains("/missing"));
+    remoteFiles.erase(remotePart);remoteFiles["/target"].data="old-remote";
+    CHECK(!session.transfer(TransferDirection::Upload,encoded(source),"/target",[&](const TransferProgress& p) {
+        final=p;if(p.active && p.transferred>0) stop.request_stop();
+    },error));
+    CHECK(final.failed && error=="Transfer cancelled" && remoteFiles.at("/target").data=="old-remote");
+    closesocket(listener);
+    std::cout<<"Atomic replacement, upload/download resume, corrupt-prefix restart, cancellation, IO/close/rename failures: OK\n";
     return 0;
 }
-int main() {
-    WSADATA data{};
-    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
-    if (libssh2_init(0) != 0) { WSACleanup(); return 1; }
-    const int result = runTests();
-    libssh2_exit();
-    WSACleanup();
-    return result;
-}
+int main(){WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data)!=0)return 1;
+if(libssh2_init(0)!=0)return 1;int result=runTests();libssh2_exit();WSACleanup();return result;}

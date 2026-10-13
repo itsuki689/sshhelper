@@ -11,6 +11,10 @@
 struct _LIBSSH2_SESSION;
 typedef struct _LIBSSH2_SESSION LIBSSH2_SESSION;
 
+struct _LIBSSH2_SFTP;
+typedef struct _LIBSSH2_SFTP LIBSSH2_SFTP;
+using TransferConfirmation = std::function<bool(std::size_t, std::uint64_t)>;
+
 class SshSession {
 public:
     explicit SshSession(std::stop_token stop = {}, long timeoutMs = 15000);
@@ -34,10 +38,11 @@ public:
                         const std::string& remoteFolder,
                         const std::optional<std::vector<std::string>>& selection,
                         const std::function<void(const TransferProgress&)>& progress,
-                        std::string& error);
+                        std::string& error, const TransferConfirmation& confirm = {});
 
     bool uploadPaths(const std::vector<std::string>& paths, const std::string& remoteFolder,
-                     const std::function<void(const TransferProgress&)>& progress, std::string& error);
+                     const std::function<void(const TransferProgress&)>& progress, std::string& error,
+                     const TransferConfirmation& confirm = {});
 
     bool transfer(TransferDirection direction,
                   const std::string& localPath,
@@ -49,7 +54,11 @@ private:
     bool transferItems(TransferDirection direction, const std::string& localFolder,
         const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
         const std::vector<std::string>* drops,
-        const std::function<void(const TransferProgress&)>& progress, std::string& error);
+        const std::function<void(const TransferProgress&)>& progress, std::string& error,
+        const TransferConfirmation& confirm);
+    bool transferOnSftp(LIBSSH2_SFTP* sftp, TransferDirection direction, const std::string& localPath,
+        const std::string& remotePath, const std::function<void(const TransferProgress&)>& progress,
+        std::string& error, std::optional<std::uint64_t> expectedSize = std::nullopt);
     std::string sessionError(const std::string& fallback) const;
 
     std::stop_token stop_;
@@ -59,4 +68,5 @@ private:
     LIBSSH2_SESSION* session_ = nullptr;
     std::uintptr_t socket_ = static_cast<std::uintptr_t>(~0ULL);
     std::string fingerprint_;
+    std::string serverIdentity_;
 };

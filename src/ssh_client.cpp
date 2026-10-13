@@ -182,6 +182,8 @@ bool SshSession::connect(const ConnectionConfig& config, std::string& error) {
         error = stop_.stop_requested() ? "Connection cancelled" : socketMessage(socketError);
         return false;
     }
+    const int noDelay = 1;
+    setsockopt(connectedSocket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
     socket_ = static_cast<std::uintptr_t>(connectedSocket);
     cancellation_.emplace(stop_, [this] {
         std::lock_guard lock(socketMutex_);
@@ -222,6 +224,7 @@ bool SshSession::connect(const ConnectionConfig& config, std::string& error) {
         disconnect();
         return false;
     }
+    serverIdentity_ = config.host + ":" + std::to_string(config.port) + ":" + config.username;
     return true;
 }
 
@@ -327,135 +330,4 @@ bool SshSession::executeScript(const std::string& script, std::string& output,
         return false;
     }
     return true;
-}
-
-bool SshSession::transfer(TransferDirection direction,
-                          const std::string& localPath,
-                          const std::string& remotePath,
-                          const std::function<void(const TransferProgress&)>& progress,
-                          std::string& error) {
-    error.clear();
-    TransferProgress state;
-    state.active = true;
-    state.direction = direction;
-    state.fileName = fileName(direction == TransferDirection::Upload ? localPath : remotePath);
-    const auto started = std::chrono::steady_clock::now();
-    auto lastReport = started - std::chrono::seconds(1);
-    auto report = [&](bool force = false) {
-        const auto now = std::chrono::steady_clock::now();
-        if (!force && now - lastReport < std::chrono::milliseconds(100)) return;
-        const auto elapsed = std::chrono::duration<double>(now - started).count();
-        state.bytesPerSecond = elapsed > 0.0 ? static_cast<std::uint64_t>(state.transferred / elapsed) : 0;
-        lastReport = now;
-        progress(state);
-    };
-    auto finish = [&](bool ok) {
-        if (stop_.stop_requested()) { error = "Transfer cancelled"; ok = false; }
-        state.active = false;
-        state.completed = ok;
-        state.failed = !ok;
-        state.message = ok ? "Completed" : error;
-        report(true);
-        return ok;
-    };
-    if (stop_.stop_requested()) return finish(false);
-    if (!session_) { error = "SSH session is not connected"; return finish(false); }
-    LIBSSH2_SFTP* sftp = libssh2_sftp_init(session_);
-    if (!sftp) { error = sessionError("Cannot initialize SFTP"); return finish(false); }
-
-    bool ok = true;
-    bool totalKnown = false;
-    auto fail = [&](const char* message) {
-        if (ok) error = message; // Preserve the first failure through cleanup.
-        ok = false;
-    };
-    auto closeRemote = [&](LIBSSH2_SFTP_HANDLE* remote) {
-        if (libssh2_sftp_close(remote) != 0) fail("Cannot close remote file");
-    };
-    if (direction == TransferDirection::Upload) {
-        std::ifstream local(std::filesystem::u8path(localPath), std::ios::binary);
-        if (!local) {
-            fail("Cannot open local file");
-        } else {
-            local.seekg(0, std::ios::end);
-            const auto size = local.tellg();
-            if (size < std::streampos(0)) fail("Cannot determine local file size");
-            else { state.total = static_cast<std::uint64_t>(size); totalKnown = true; }
-            local.seekg(0, std::ios::beg);
-            if (!local) fail("Cannot seek local file");
-            // Validate the source before truncating the destination.
-            if (ok && !stop_.stop_requested()) {
-                LIBSSH2_SFTP_HANDLE* remote = libssh2_sftp_open(
-                    sftp, remotePath.c_str(), LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC, 0644);
-                if (!remote) {
-                    fail("Cannot open remote destination");
-                } else {
-                    std::array<char, 64 * 1024> buffer{};
-                    while (ok && !stop_.stop_requested()) {
-                        local.read(buffer.data(), buffer.size());
-                        if (local.bad() || (local.fail() && !local.eof())) {
-                            fail("Cannot read local source");
-                            break;
-                        }
-                        auto remaining = local.gcount();
-                        const char* cursor = buffer.data();
-                        while (remaining > 0 && !stop_.stop_requested()) {
-                            const auto written = libssh2_sftp_write(remote, cursor, static_cast<std::size_t>(remaining));
-                            if (written <= 0) { fail("SFTP upload failed"); break; }
-                            cursor += written;
-                            remaining -= written;
-                            state.transferred += static_cast<std::uint64_t>(written);
-                            report();
-                        }
-                        if (local.eof()) break;
-                    }
-                    closeRemote(remote);
-                }
-            }
-        }
-    } else {
-        LIBSSH2_SFTP_HANDLE* remote = stop_.stop_requested() ? nullptr :
-            libssh2_sftp_open(sftp, remotePath.c_str(), LIBSSH2_FXF_READ, 0);
-        if (!remote) {
-            fail("Cannot open remote source");
-        } else {
-            LIBSSH2_SFTP_ATTRIBUTES attributes{};
-            if (libssh2_sftp_fstat(remote, &attributes) == 0 && (attributes.flags & LIBSSH2_SFTP_ATTR_SIZE)) {
-                state.total = attributes.filesize;
-                totalKnown = true;
-            }
-            if (!stop_.stop_requested()) {
-                std::ofstream local(std::filesystem::u8path(localPath), std::ios::binary | std::ios::trunc);
-                if (!local) {
-                    fail("Cannot open local destination");
-                } else {
-                    std::array<char, 64 * 1024> buffer{};
-                    while (!stop_.stop_requested()) {
-                        const auto count = libssh2_sftp_read(remote, buffer.data(), buffer.size());
-                        if (count > 0) {
-                            local.write(buffer.data(), count);
-                            if (!local) { fail("Cannot write local destination"); break; }
-                            state.transferred += static_cast<std::uint64_t>(count);
-                            report();
-                        } else if (count == 0) {
-                            break;
-                        } else {
-                            fail("SFTP download failed");
-                            break;
-                        }
-                    }
-                    // Buffered writes can fail only at flush/close, after the last write succeeded.
-                    local.flush();
-                    if (!local) fail("Cannot flush local destination");
-                    local.close();
-                    if (!local) fail("Cannot close local destination");
-                }
-            }
-            closeRemote(remote);
-        }
-    }
-    if (ok && totalKnown && state.transferred != state.total)
-        fail("Transferred size does not match source size");
-    if (libssh2_sftp_shutdown(sftp) != 0) fail("Cannot close SFTP session");
-    return finish(ok);
 }

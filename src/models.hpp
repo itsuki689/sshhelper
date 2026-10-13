@@ -17,6 +17,7 @@ struct GpuMetrics {
     double powerWatts = -1.0;
     double fanPercent = -1.0;
     double fanRpm = -1.0;
+    double memoryClockMHz = -1.0;
     std::uint64_t memoryUsed = 0;
     std::uint64_t memoryTotal = 0;
 };
@@ -25,10 +26,15 @@ struct TelemetrySnapshot {
     bool connected = false;
     std::string status = "Not connected";
     std::string fingerprint;
+    std::string hostName;
     std::string cpuName;
     std::string cpuPowerStrategy;
     double packageTemperature = -1.0;
     double packagePowerWatts = -1.0;
+    // Hottest NVMe composite temperature; negative means unavailable.
+    double ssdTemperature = -1.0;
+    // Configured DDR transfer rate, not a live oscillator frequency.
+    std::uint64_t memoryRateMTs = 0;
     std::vector<SensorValue> coreTemperatures;
     std::vector<SensorValue> fans;
     std::vector<GpuMetrics> gpus;
@@ -38,6 +44,8 @@ struct TelemetrySnapshot {
     std::uint64_t diskTotal = 0;
     std::uint64_t networkDown = 0;
     std::uint64_t networkUp = 0;
+    // Negotiated link speed of the sampled interface; zero means unavailable.
+    std::uint64_t networkLinkMbps = 0;
     double sshLatencyMs = 0.0;
     std::chrono::system_clock::time_point sampledAt{};
 };
@@ -79,6 +87,7 @@ struct TransferProgress {
     TransferDirection direction = TransferDirection::Upload;
     std::string fileName;
     std::string message;
+    std::uint64_t resumedBytes = 0;
     std::uint64_t transferred = 0;
     std::uint64_t total = 0;
     std::uint64_t bytesPerSecond = 0;

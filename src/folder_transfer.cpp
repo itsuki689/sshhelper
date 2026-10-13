@@ -96,12 +96,17 @@ LIBSSH2_SFTP_ATTRIBUTES attributes(LIBSSH2_SFTP* sftp, const std::string& path) 
         throw std::runtime_error("Cannot inspect remote path: " + path);
     return result;
 }
-void ensureRemoteDirectory(LIBSSH2_SFTP* sftp, const std::string& path, bool create) {
+void ensureRemoteDirectory(LIBSSH2_SFTP* sftp, const std::string& path, bool create,
+                           std::set<std::string>* checked = nullptr) {
     if (path == "/") return;
     std::size_t end = 1;
     for (;;) {
         end = path.find('/', end);
         const auto part = path.substr(0, end);
+        if (checked && checked->contains(part)) {
+            if (end == std::string::npos) break;
+            ++end; continue;
+        }
         LIBSSH2_SFTP_ATTRIBUTES attr{};
         if (libssh2_sftp_lstat(sftp, part.c_str(), &attr) != 0) {
             if (!create || libssh2_sftp_last_error(sftp) != LIBSSH2_FX_NO_SUCH_FILE)
@@ -115,9 +120,13 @@ void ensureRemoteDirectory(LIBSSH2_SFTP* sftp, const std::string& path, bool cre
         }
         if (!(attr.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) || !LIBSSH2_SFTP_S_ISDIR(attr.permissions))
             throw std::runtime_error("Remote folder is a link or file: " + part);
+        if (checked) checked->insert(part);
         if (end == std::string::npos) break;
         ++end;
     }
+}
+bool isTemporary(const std::string& name) {
+    return name.size() == 77 && name.starts_with(".airsftp-") && name.ends_with(".part");
 }
 }
 
@@ -137,6 +146,7 @@ bool SshSession::listFolder(TransferDirection direction, const std::string& fold
                 const auto flags = GetFileAttributesW(it->path().c_str());
                 if (flags == INVALID_FILE_ATTRIBUTES) throw std::runtime_error("Cannot inspect local entry");
                 if (flags & FILE_ATTRIBUTE_REPARSE_POINT) { it.disable_recursion_pending(); continue; }
+                if (isTemporary(encoded(it->path().filename()))) { it.disable_recursion_pending(); continue; }
                 const auto relative = encoded(it->path().lexically_relative(root));
                 if (!validRelative(relative)) throw std::runtime_error("Unsupported file name: " + relative);
                 const bool directory = it->is_directory();
@@ -166,7 +176,7 @@ bool SshSession::listFolder(TransferDirection direction, const std::string& fold
                     if (count == 0) break;
                     if (count < 0) throw std::runtime_error("Cannot read remote folder: " + path);
                     const std::string leaf(name.data(), count);
-                    if (leaf == "." || leaf == "..") continue;
+                    if (leaf == "." || leaf == ".." || isTemporary(leaf)) continue;
                     if (leaf.find('/') != std::string::npos || !validRelative(leaf))
                         throw std::runtime_error("Unsupported remote file name: " + leaf);
                     const auto child = relative.empty() ? leaf : relative + "/" + leaf;
@@ -199,27 +209,31 @@ bool SshSession::listFolder(TransferDirection direction, const std::string& fold
 
 bool SshSession::transferFolder(TransferDirection direction, const std::string& localFolder,
     const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
-    const std::function<void(const TransferProgress&)>& progress, std::string& error) {
-    return transferItems(direction, localFolder, remoteFolder, selection, nullptr, progress, error);
+    const std::function<void(const TransferProgress&)>& progress, std::string& error, const TransferConfirmation& confirm) {
+    return transferItems(direction, localFolder, remoteFolder, selection, nullptr, progress, error, confirm);
 }
 
 bool SshSession::uploadPaths(const std::vector<std::string>& paths, const std::string& remoteFolder,
-    const std::function<void(const TransferProgress&)>& progress, std::string& error) {
-    return transferItems(TransferDirection::Upload, ".", remoteFolder, std::nullopt, &paths, progress, error);
+    const std::function<void(const TransferProgress&)>& progress, std::string& error, const TransferConfirmation& confirm) {
+    return transferItems(TransferDirection::Upload, ".", remoteFolder, std::nullopt, &paths, progress, error, confirm);
 }
 
 bool SshSession::transferItems(TransferDirection direction, const std::string& localFolder,
     const std::string& remoteFolder, const std::optional<std::vector<std::string>>& selection,
     const std::vector<std::string>* drops,
-    const std::function<void(const TransferProgress&)>& progress, std::string& error) {
+    const std::function<void(const TransferProgress&)>& progress, std::string& error, const TransferConfirmation& confirm) {
     TransferProgress state;
     state.active = true;
     state.direction = direction;
     state.fileName = "Scanning folder...";
     const auto started = std::chrono::steady_clock::now();
-    auto report = [&] {
+    auto lastReport = started - std::chrono::seconds(1);
+    auto report = [&](bool force = false) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!force && now - lastReport < std::chrono::milliseconds(100)) return;
+        lastReport = now;
         const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-        state.bytesPerSecond = seconds > 0 ? static_cast<std::uint64_t>(state.transferred / seconds) : 0;
+        state.bytesPerSecond = seconds > 0 ? static_cast<std::uint64_t>((state.transferred - state.resumedBytes) / seconds) : 0;
         progress(state);
     };
     report();
@@ -298,11 +312,15 @@ bool SshSession::transferItems(TransferDirection direction, const std::string& l
             }
         }
         if (stop_.stop_requested()) throw std::runtime_error("Transfer cancelled");
+        if (state.filesTotal > 5 && (!confirm || !confirm(state.filesTotal, state.total)))
+            throw std::runtime_error("Batch transfer not confirmed");
+        if (stop_.stop_requested()) throw std::runtime_error("Transfer cancelled");
         Sftp sftp(libssh2_sftp_init(session_), libssh2_sftp_shutdown);
         if (!sftp) throw std::runtime_error("Cannot initialize SFTP");
-        if (direction == TransferDirection::Upload) ensureRemoteDirectory(sftp.get(), remote, true);
+        std::set<std::string> checkedDirectories;
+        if (direction == TransferDirection::Upload) ensureRemoteDirectory(sftp.get(), remote, true, &checkedDirectories);
         else checkLocal(local, true, true);
-        std::uint64_t completedBytes = 0;
+        std::uint64_t completedBytes = 0, completedResumed = 0;
         for (const auto& entry : entries) {
             if (stop_.stop_requested()) throw std::runtime_error("Transfer cancelled");
             const auto localFile = drops ? dropSources.at(entry.relativePath) : local / fs::u8path(entry.relativePath);
@@ -311,31 +329,26 @@ bool SshSession::transferItems(TransferDirection direction, const std::string& l
             if (direction == TransferDirection::Upload) {
                 checkLocal(localFile, entry.directory, false);
                 ensureRemoteDirectory(sftp.get(), entry.directory ? remoteFile :
-                    remoteFile.substr(0, std::max(std::size_t{1}, remoteFile.find_last_of('/'))), true);
-                if (!entry.directory) {
-                    LIBSSH2_SFTP_ATTRIBUTES attr{};
-                    if (libssh2_sftp_lstat(sftp.get(), remoteFile.c_str(), &attr) == 0) {
-                        if (!(attr.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) || !LIBSSH2_SFTP_S_ISREG(attr.permissions))
-                            throw std::runtime_error("Remote destination is not a regular file: " + remoteFile);
-                    } else if (libssh2_sftp_last_error(sftp.get()) != LIBSSH2_FX_NO_SUCH_FILE)
-                        throw std::runtime_error("Cannot inspect destination: " + remoteFile);
-                }
+                    remoteFile.substr(0, std::max(std::size_t{1}, remoteFile.find_last_of('/'))), true, &checkedDirectories);
+
             } else {
                 ensureRemoteDirectory(sftp.get(), entry.directory ? remoteFile :
-                    remoteFile.substr(0, std::max(std::size_t{1}, remoteFile.find_last_of('/'))), false);
-                if (!entry.directory && !LIBSSH2_SFTP_S_ISREG(attributes(sftp.get(), remoteFile).permissions))
-                    throw std::runtime_error("Remote source changed type: " + remoteFile);
+                    remoteFile.substr(0, std::max(std::size_t{1}, remoteFile.find_last_of('/'))), false, &checkedDirectories);
+
                 checkLocal(localFile, entry.directory, true);
             }
             if (!entry.directory) {
                 std::uint64_t fileBytes = 0;
-                if (!transfer(direction, encoded(localFile), remoteFile, [&](const TransferProgress& part) {
+                if (!transferOnSftp(sftp.get(), direction, encoded(localFile), remoteFile, [&](const TransferProgress& part) {
                     fileBytes = part.transferred;
                     state.transferred = completedBytes + part.transferred;
+                    state.resumedBytes = completedResumed + part.resumedBytes;
+                    state.message = part.message;
                     report();
-                }, error)) throw std::runtime_error(entry.relativePath + ": " + error);
+                }, error, entry.size)) throw std::runtime_error(entry.relativePath + ": " + error);
                 if (fileBytes != entry.size) throw std::runtime_error("Source size changed: " + entry.relativePath);
                 completedBytes += fileBytes;
+                completedResumed = state.resumedBytes;
                 ++state.filesCompleted;
             }
             report();
@@ -351,6 +364,6 @@ bool SshSession::transferItems(TransferDirection direction, const std::string& l
         state.failed = true;
         state.message = error;
     }
-    report();
+    report(true);
     return state.completed;
 }

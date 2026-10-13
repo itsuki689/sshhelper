@@ -1,102 +1,4 @@
-#include "ssh_client.hpp"
-#include <winsock2.h>
-#include <windows.h>
-#include <libssh2.h>
-#include <libssh2_sftp.h>
-#include <algorithm>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <iterator>
-#include <map>
-
-namespace {
-struct Node { unsigned long mode; std::string data; };
-std::map<std::string, Node> remoteFiles{{"/", {LIBSSH2_SFTP_S_IFDIR, ""}}};
-struct MockFile { std::string path; std::size_t offset = 0; std::vector<std::string> children; };
-unsigned long lastError = 0;
-bool failWrite = false, failClose = false, failMkdir = false;
-int sftpToken;
-std::string badName;
-void attrFor(const Node& node, LIBSSH2_SFTP_ATTRIBUTES* attr) {
-    *attr = {};
-    attr->flags = LIBSSH2_SFTP_ATTR_PERMISSIONS | LIBSSH2_SFTP_ATTR_SIZE;
-    attr->permissions = node.mode;
-    attr->filesize = node.data.size();
-}
-}
-extern "C" {
-int __wrap_libssh2_session_handshake(LIBSSH2_SESSION*, libssh2_socket_t) { return 0; }
-const char* __wrap_libssh2_hostkey_hash(LIBSSH2_SESSION*, int) {
-    static const char key[32] = "folder-test-only"; return key;
-}
-int __wrap_libssh2_userauth_password_ex(LIBSSH2_SESSION*, const char*, unsigned int,
-    const char*, unsigned int, LIBSSH2_PASSWD_CHANGEREQ_FUNC(*)) { return 0; }
-LIBSSH2_SFTP* __wrap_libssh2_sftp_init(LIBSSH2_SESSION*) { return reinterpret_cast<LIBSSH2_SFTP*>(&sftpToken); }
-int __wrap_libssh2_sftp_shutdown(LIBSSH2_SFTP*) { return 0; }
-unsigned long __wrap_libssh2_sftp_last_error(LIBSSH2_SFTP*) { return lastError; }
-int __wrap_libssh2_sftp_stat_ex(LIBSSH2_SFTP*, const char* path, unsigned int length, int, LIBSSH2_SFTP_ATTRIBUTES* attr) {
-    const auto it = remoteFiles.find(std::string(path, length));
-    if (it == remoteFiles.end()) { lastError = LIBSSH2_FX_NO_SUCH_FILE; return -1; }
-    attrFor(it->second, attr); return 0;
-}
-int __wrap_libssh2_sftp_mkdir_ex(LIBSSH2_SFTP*, const char* path, unsigned int length, long) {
-    if (failMkdir) { lastError = LIBSSH2_FX_PERMISSION_DENIED; return -1; }
-    auto [it, inserted] = remoteFiles.emplace(std::string(path, length), Node{LIBSSH2_SFTP_S_IFDIR, ""});
-    return inserted ? 0 : -1;
-}
-LIBSSH2_SFTP_HANDLE* __wrap_libssh2_sftp_open_ex(LIBSSH2_SFTP*, const char* path, unsigned int length,
-    unsigned long flags, long, int type) {
-    std::string name(path, length);
-    if (type == LIBSSH2_SFTP_OPENDIR) {
-        if (!remoteFiles.contains(name) || !LIBSSH2_SFTP_S_ISDIR(remoteFiles.at(name).mode)) return nullptr;
-        auto* file = new MockFile{name};
-        const auto prefix = name == "/" ? name : name + "/";
-        for (const auto& [key, node] : remoteFiles) {
-            if (key.starts_with(prefix) && key.size() > prefix.size()) {
-                const auto child = key.substr(prefix.size());
-                if (child.find('/') == std::string::npos) file->children.push_back(child);
-            }
-        }
-        if (!badName.empty()) file->children.push_back(badName);
-        return reinterpret_cast<LIBSSH2_SFTP_HANDLE*>(file);
-    }
-    if (flags & LIBSSH2_FXF_WRITE) remoteFiles[name] = {LIBSSH2_SFTP_S_IFREG, ""};
-    if (!remoteFiles.contains(name)) return nullptr;
-    return reinterpret_cast<LIBSSH2_SFTP_HANDLE*>(new MockFile{name});
-}
-int __wrap_libssh2_sftp_readdir_ex(LIBSSH2_SFTP_HANDLE* handle, char* buffer, size_t capacity,
-    char*, size_t, LIBSSH2_SFTP_ATTRIBUTES* attr) {
-    auto& file = *reinterpret_cast<MockFile*>(handle);
-    if (file.offset == file.children.size()) return 0;
-    const auto& name = file.children[file.offset++];
-    if (name.size() > capacity) return -1;
-    std::memcpy(buffer, name.data(), name.size());
-    if (name == badName) attrFor({LIBSSH2_SFTP_S_IFREG, "bad"}, attr);
-    else attrFor(remoteFiles.at(file.path + (file.path == "/" ? "" : "/") + name), attr);
-    return static_cast<int>(name.size());
-}
-int __wrap_libssh2_sftp_fstat_ex(LIBSSH2_SFTP_HANDLE* handle, LIBSSH2_SFTP_ATTRIBUTES* attr, int) {
-    attrFor(remoteFiles.at(reinterpret_cast<MockFile*>(handle)->path), attr); return 0;
-}
-ssize_t __wrap_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE* handle, char* buffer, size_t capacity) {
-    auto& file = *reinterpret_cast<MockFile*>(handle);
-    const auto& data = remoteFiles.at(file.path).data;
-    const auto count = std::min(capacity, data.size() - file.offset);
-    std::memcpy(buffer, data.data() + file.offset, count);
-    file.offset += count; return count;
-}
-ssize_t __wrap_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE* handle, const char* buffer, size_t count) {
-    if (failWrite) return -1;
-    count = std::min(count, std::size_t{8191});
-    remoteFiles.at(reinterpret_cast<MockFile*>(handle)->path).data.append(buffer, count);
-    return count;
-}
-int __wrap_libssh2_sftp_close_handle(LIBSSH2_SFTP_HANDLE* handle) {
-    delete reinterpret_cast<MockFile*>(handle); return failClose ? -1 : 0;
-}
-}
+#include "mock_sftp.hpp"
 #define CHECK(c) do { if (!(c)) { std::cerr << "Line " << __LINE__ << ": " #c << "\n" << error << "\n"; return __LINE__; } } while(false)
 
 int runTests() {
@@ -131,9 +33,11 @@ int runTests() {
     closesocket(listener);
     TransferProgress final;
     auto progress = [&](const TransferProgress& value) { final = value; };
+    const int beforeUpload = initCount;
     CHECK(session.transferFolder(TransferDirection::Upload, utf8(source), "/out/new", std::nullopt, progress, error));
     CHECK(final.completed && final.filesCompleted == 4 && final.filesTotal == 4 && final.total == 70013);
     CHECK(final.transferred == final.total);
+    CHECK(initCount == beforeUpload + 1);
     CHECK(remoteFiles.at("/out/new/a.txt").data == "alpha");
     CHECK(remoteFiles.at("/out/new/sub/b.txt").data == std::string(70001, 'b'));
     CHECK(LIBSSH2_SFTP_S_ISDIR(remoteFiles.at("/out/new/sub/empty").mode));
@@ -215,6 +119,28 @@ int runTests() {
     CHECK(session.uploadPaths({utf8(root / "empty")}, "/empty-drop", progress, error));
     CHECK(final.completed && final.filesTotal == 0 && remoteFiles.contains("/empty-drop/empty"));
 
+    fs::create_directory(root / "six");
+    for (int i = 0; i < 6; ++i) { std::ofstream(root / "six" / (std::to_string(i) + ".txt")) << "hello"; }
+    int confirmations = 0;
+    auto reject = [&](std::size_t count, std::uint64_t bytes) { ++confirmations; return false; };
+    CHECK(!session.transferFolder(TransferDirection::Upload, utf8(root / "six"), "/reject", std::nullopt,
+        progress, error, reject));
+    CHECK(confirmations == 1 && !remoteFiles.contains("/reject"));
+    CHECK(!session.uploadPaths({utf8(root / "six")}, "/drop-reject", progress, error, reject));
+    CHECK(confirmations == 2 && !remoteFiles.contains("/drop-reject"));
+    CHECK(!session.transferFolder(TransferDirection::Upload, utf8(root / "six"), "/no-confirm",
+        std::nullopt, progress, error));
+    CHECK(!remoteFiles.contains("/no-confirm"));
+    auto approve = [&](std::size_t count, std::uint64_t bytes) { ++confirmations; return count == 6 && bytes == 30; };
+    CHECK(session.transferFolder(TransferDirection::Upload, utf8(root / "six"), "/six", std::nullopt,
+        progress, error, approve));
+    CHECK(confirmations == 3 && final.filesCompleted == 6);
+    CHECK(!session.transferFolder(TransferDirection::Download, utf8(root / "reject-download"), "/six",
+        std::nullopt, progress, error, reject));
+    CHECK(confirmations == 4 && !fs::exists(root / "reject-download"));
+    CHECK(session.transferFolder(TransferDirection::Upload, utf8(root / "six"), "/five",
+        std::vector<std::string>{"0.txt","1.txt","2.txt","3.txt","4.txt"}, progress, error, reject));
+    CHECK(confirmations == 4 && final.filesCompleted == 5);
     failWrite = true;
     CHECK(!session.transferFolder(TransferDirection::Upload, utf8(source), "/failed", std::nullopt, progress, error));
     CHECK(final.failed && !final.completed);

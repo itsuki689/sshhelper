@@ -42,6 +42,12 @@ void App::applyProfile(const ServerProfile& value) {
     foreground_ = value.foreground;
 }
 
+std::string App::windowTitle() const {
+    if (!detectedHostName_.empty()) return detectedHostName_;
+    if (!serverName_.empty()) return serverName_;
+    return config_.host.empty() ? "AirSFTP" : config_.host;
+}
+
 ServerProfile App::profile() const {
     ServerProfile value;
     value.connection = config_;
@@ -81,13 +87,13 @@ void App::addServer() {
         MessageBoxW(settingsWindow_, L"无法创建服务器窗口。", L"AirSFTP", MB_OK | MB_ICONERROR);
         return;
     }
-    if (settingsWindow_) ShowWindow(settingsWindow_, SW_HIDE);
+    hideSettings();
     added->showSettings();
 }
 
 void App::reopenServers() {
     for (auto* server : servers()) {
-        if (server->window_) continue;
+        if (server->window_) { server->showWhenConnected_ = false; server->showAtBottomRight(); continue; }
         server->collapseMode_ = CollapseMode::Expanded;
         server->animating_ = false;
         server->hasExpandedRect_ = false;
@@ -98,7 +104,7 @@ void App::reopenServers() {
 
 void App::switchServer(bool previous) {
     auto open = servers();
-    std::erase_if(open, [](App* app) { return !app->window_; });
+    std::erase_if(open, [](App* app) { return !app->window_ || !IsWindowVisible(app->window_); });
     if (open.empty()) return;
     const HWND foreground = GetForegroundWindow();
     auto current = std::find_if(open.begin(), open.end(), [foreground](App* app) {
@@ -175,6 +181,7 @@ void App::chooseTheme(bool background) {
     if (!config_.host.empty() && !saveServers()) color = old;
     discardGraphics();
     InvalidateRect(window_, nullptr, FALSE);
+    if (settingsWindow_) RedrawWindow(settingsWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
 void App::dropFiles(HDROP drop) {
@@ -203,6 +210,7 @@ void App::uploadDropped(std::vector<std::string> paths) {
         MessageBoxW(settingsWindow_, L"请先保存服务器连接信息和远程文件夹，然后重新拖入文件。", L"AirSFTP", MB_OK);
         return;
     }
+    transferLocalFolder_ = encoded(std::filesystem::u8path(paths.front()).parent_path().wstring());
     stopTransfer();
     const auto generation = transferGeneration_;
     transfer_ = {};
@@ -225,6 +233,47 @@ void App::uploadDropped(std::vector<std::string> paths) {
         }
         session.uploadPaths(paths, remote, [this, generation](const TransferProgress& value) {
             postTransfer(value, generation);
-        }, error);
+        }, error, [this, generation, token, remote, &paths](std::size_t count, std::uint64_t bytes) {
+            return confirmTransfer(count, bytes, TransferDirection::Upload,
+                paths.size() == 1 ? paths.front() : std::to_string(paths.size()) + " dropped items",
+                remote, generation, token);
+        });
     });
+}
+
+bool App::confirmTransfer(std::size_t count, std::uint64_t bytes, TransferDirection direction,
+    const std::string& source, const std::string& destination, std::uintptr_t generation, std::stop_token token) {
+    auto request = std::make_shared<TransferDecision>();
+    request->count = count; request->bytes = bytes; request->direction = direction;
+    request->source = source; request->destination = destination;
+    auto payload = std::make_unique<std::shared_ptr<TransferDecision>>(request);
+    {
+        std::lock_guard lock(messageMutex_);
+        if (!messageWindow_ || !PostMessageW(messageWindow_, WM_APP + 3, generation,
+            reinterpret_cast<LPARAM>(payload.get()))) return false;
+        payload.release();
+    }
+    while (request->result.load() == -1 && !token.stop_requested())
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return !token.stop_requested() && request->result.load() == 1;
+}
+
+void App::openLocalFolder() {
+    std::string path = transferLocalFolder_.empty() ? localPath_ : transferLocalFolder_;
+    if (settingsWindow_ && IsWindowVisible(settingsWindow_)) {
+        const auto edit = GetDlgItem(settingsWindow_, LocalEdit);
+        std::wstring value(GetWindowTextLengthW(edit) + 1, L'\0');
+        const int count = GetWindowTextW(edit, value.data(), int(value.size()));
+        value.resize(count);
+        if (!value.empty()) path = encoded(value);
+    }
+    std::error_code error;
+    const auto folder = std::filesystem::u8path(path);
+    if (path.empty() || !folder.is_absolute() || !std::filesystem::is_directory(folder, error)) {
+        MessageBoxW(settingsWindow_ ? settingsWindow_ : window_, L"本地文件夹不存在，请先选择或创建文件夹。",
+            L"AirSFTP", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (reinterpret_cast<INT_PTR>(ShellExecuteW(window_, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32)
+        MessageBoxW(window_, L"无法打开本地文件夹。", L"AirSFTP", MB_OK | MB_ICONWARNING);
 }

@@ -26,6 +26,7 @@ FetchContent_MakeAvailable(libssh2)
 add_library(airsftp_core STATIC
   src/credential_store.cpp
   src/ssh_client.cpp
+  src/transfer_engine.cpp
   src/folder_transfer.cpp
   src/telemetry.cpp
 )
@@ -37,6 +38,7 @@ add_executable(AirSFTP WIN32
   src/main.cpp
   src/app.cpp
   src/app_servers.cpp
+  src/app_tray.cpp
   src/transfer_picker.cpp
   resources/AirSFTP.rc
 )
@@ -68,7 +70,8 @@ if(MINGW)
   # Isolate the test-only pinned host key from the application.
   set_target_properties(transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/transfer-test")
   foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
-              sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle)
+              sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle sftp_stat_ex
+              sftp_mkdir_ex sftp_last_error sftp_readdir_ex sftp_seek64 sftp_fsync sftp_posix_rename_ex)
     target_link_options(transfer_test PRIVATE "-Wl,--wrap=libssh2_${api}")
   endforeach()
   add_test(NAME transfer COMMAND transfer_test)
@@ -78,7 +81,7 @@ if(MINGW)
   set_target_properties(folder_transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/folder-test")
   foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
               sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle sftp_stat_ex
-              sftp_mkdir_ex sftp_last_error sftp_readdir_ex)
+              sftp_mkdir_ex sftp_last_error sftp_readdir_ex sftp_seek64 sftp_fsync sftp_posix_rename_ex)
     target_link_options(folder_transfer_test PRIVATE "-Wl,--wrap=libssh2_${api}")
   endforeach()
   add_test(NAME folder_transfer COMMAND folder_transfer_test)
@@ -86,11 +89,21 @@ if(MINGW)
 
 endif()
 
-add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/app_tray.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
 target_include_directories(app_windows_test PRIVATE resources)
 target_link_libraries(app_windows_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
 set_target_properties(app_windows_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/window-test")
 add_test(NAME app_windows COMMAND app_windows_test)
 set_tests_properties(app_windows PROPERTIES TIMEOUT 15)
+
+# Manual integration test; never connects to a server during CTest.
+add_executable(live_transfer_test EXCLUDE_FROM_ALL tests/live_transfer_test.cpp)
+target_link_libraries(live_transfer_test PRIVATE airsftp_core)
+set_target_properties(live_transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
+
+# Manual, read-only sensor diagnostics using an explicitly selected saved server.
+add_executable(live_telemetry_test EXCLUDE_FROM_ALL tests/live_telemetry_test.cpp)
+target_link_libraries(live_telemetry_test PRIVATE airsftp_core)
+set_target_properties(live_telemetry_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
 
 install(TARGETS AirSFTP RUNTIME DESTINATION .)

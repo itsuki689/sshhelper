@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <filesystem>
 
 #include <sstream>
@@ -27,8 +28,9 @@ constexpr wchar_t MainClass[] = L"AirSFTPFloatingWindow";
 constexpr wchar_t SettingsClass[] = L"AirSFTPSettingsWindow";
 constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
+constexpr UINT ConfirmTransferMessage = WM_APP + 3;
 constexpr int MainWidth = 380;
-constexpr int MainHeight = 270;
+constexpr int MainHeight = 300;
 constexpr int CompactWidth = 100;
 constexpr int CompactHeight = 32;
 constexpr int SideWidth = 36;
@@ -40,8 +42,19 @@ constexpr UINT_PTR AnimationTimerId = 1;
 constexpr UINT AnimationFrameMs = 15;
 constexpr ULONGLONG AnimationDurationMs = 180;
 constexpr int SettingsWidth = 480;
-constexpr int SettingsHeight = 650;
+constexpr int SettingsHeight = 548;
+constexpr UINT_PTR SettingsAnimationTimerId = 2;
 constexpr int SettingsHeaderHeight = 52;
+
+COLORREF settingsColor(std::uint32_t rgb) {
+    return RGB(rgb >> 16, (rgb >> 8) & 255, rgb & 255);
+}
+
+COLORREF blendColor(COLORREF a, COLORREF b, float amount) {
+    auto mix = [amount](int x, int y) { return int(x + (y - x) * amount); };
+    return RGB(mix(GetRValue(a), GetRValue(b)), mix(GetGValue(a), GetGValue(b)),
+        mix(GetBValue(a), GetBValue(b)));
+}
 
 int pixels(int dips, UINT dpi) {
     return MulDiv(dips, static_cast<int>(dpi), 96);
@@ -107,6 +120,14 @@ std::wstring storageText(std::uint64_t bytes) {
     constexpr double BytesPerGigabyte = 1'000'000'000.0;
     wchar_t buffer[64]{};
     swprintf(buffer, 64, L"%.3f GB", static_cast<double>(bytes) / BytesPerGigabyte);
+    return buffer;
+}
+
+std::wstring linkSpeedText(std::uint64_t mbps) {
+    if (!mbps) return L"—";
+    if (mbps < 1000) return std::to_wstring(mbps) + L" Mbps";
+    wchar_t buffer[64]{};
+    swprintf(buffer, 64, L"%.3g Gbps", static_cast<double>(mbps) / 1000.0);
     return buffer;
 }
 
@@ -188,6 +209,7 @@ App::App(HINSTANCE instance) : instance_(instance) {
 }
 
 App::~App() {
+    removeTray();
     stopTransfer();
     stopMonitor();
     if (transferThread_.joinable()) transferThread_.join();
@@ -206,14 +228,17 @@ int App::run(int showCommand) {
     std::string error;
     loadServerSettings(defaultCredentialPath(), saved, error);
     if (!saved.servers.empty()) applyProfile(saved.servers.front());
-    if (!registerClasses() || !createMainWindow(showCommand)) return 1;
+    if (!registerClasses() || !createMainWindow(SW_HIDE)) return 1;
+    const bool trayReady = createTray();
+    showWhenConnected_ = !config_.host.empty();
     if (!error.empty()) { snapshot_.status = error; InvalidateRect(window_, nullptr, FALSE); }
     for (std::size_t i = 1; i < saved.servers.size(); ++i) {
         auto child = std::make_unique<App>(instance_);
         child->root_ = this;
         child->windowSlot_ = i;
         child->applyProfile(saved.servers[i]);
-        child->createMainWindow(SW_SHOWNOACTIVATE);
+        child->showWhenConnected_ = true;
+        child->createMainWindow(SW_HIDE);
         children_.push_back(std::move(child));
     }
     nextHotkey_ = saved.nextHotkey;
@@ -222,6 +247,10 @@ int App::run(int showCommand) {
     for (auto* server : servers())
         if (server->window_ && !server->config_.host.empty()) server->startMonitor(server->config_);
     if (config_.host.empty()) showSettings();
+    if (!trayReady) {
+        // Keep settings reachable if Explorer cannot create a tray icon.
+        for (auto* server : servers()) if (server->window_) ShowWindow(server->window_, showCommand);
+    }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (message.message == WM_HOTKEY && !message.hwnd) {
@@ -241,6 +270,7 @@ int App::run(int showCommand) {
         server->stopMonitor();
         server->stopTransfer();
     }
+    quitApplication();
     return static_cast<int>(message.wParam);
 }
 
@@ -287,7 +317,7 @@ bool App::createMainWindow(int showCommand) {
     const int columns = std::max(1, (int(work.right - work.left) - margin) / (width + margin));
     const int slot = static_cast<int>(windowSlot_) % (rows * columns);
     window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, MainClass,
-        wide(serverName_.empty() ? "AirSFTP" : serverName_).c_str(),
+        wide(windowTitle()).c_str(),
         WS_POPUP, std::max(int(work.left), int(work.right) - (slot / rows + 1) * (width + margin)),
         std::max(int(work.top), int(work.bottom) - (slot % rows + 1) * (height + margin)),
         width, height, nullptr, nullptr, instance_, this);
@@ -318,6 +348,8 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     switch (message) {
     case WM_DROPFILES: dropFiles(reinterpret_cast<HDROP>(wParam)); return 0;
     case WM_PAINT: paint(); return 0;
+    // Direct2D presents a complete frame; do not erase the front buffer first.
+    case WM_ERASEBKGND: return 1;
     case WM_SIZE: resizeGraphics(); return 0;
     case WM_TIMER:
         if (wParam == AnimationTimerId) {
@@ -364,7 +396,14 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         }
         return result;
     }
-    case WM_LBUTTONDOWN:
+    case WM_NCLBUTTONDOWN:
+        hideSettings();
+        break;
+    case WM_LBUTTONDOWN: {
+        const UINT dpi = GetDpiForWindow(window);
+        const int x = dips(GET_X_LPARAM(lParam), dpi), y = dips(GET_Y_LPARAM(lParam), dpi);
+        const bool gear = !isCollapsed() && y < 48 && x > MainWidth - 112 && x <= MainWidth - 38;
+        if (!gear) hideSettings();
         if (animating_) return 0;
         if (isCollapsed()) {
             GetCursorPos(&compactPressCursor_);
@@ -375,6 +414,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
             return 0;
         }
         break;
+    }
     case WM_MOUSEMOVE:
         if (compactPointerDown_) {
             if (!(wParam & MK_LBUTTON)) return 0;
@@ -433,15 +473,39 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         if (isCollapsed()) return 0;
         const UINT dpi = GetDpiForWindow(window);
         const int x = dips(GET_X_LPARAM(lParam), dpi), y = dips(GET_Y_LPARAM(lParam), dpi);
-        if (y < 48 && x > MainWidth - 38) DestroyWindow(window_);
-        else if (y < 48 && x > MainWidth - 112) showSettings();
+        if (y < 48 && x > MainWidth - 38) hideToTray();
+        else if (y < 48 && x > MainWidth - 112) toggleSettings();
+        else if (y >= 266 && y < 288 && x < 210) openLocalFolder();
         return 0;
     }
     case SnapshotMessage: {
         std::unique_ptr<TelemetrySnapshot> value(reinterpret_cast<TelemetrySnapshot*>(lParam));
         if (wParam != monitorGeneration_) return 0;
         snapshot_ = std::move(*value);
+        if (snapshot_.connected && showWhenConnected_) {
+            showWhenConnected_ = false;
+            showAtBottomRight();
+        }
+        if (snapshot_.connected && !snapshot_.hostName.empty() &&
+            detectedHostName_ != snapshot_.hostName) {
+            detectedHostName_ = snapshot_.hostName;
+            SetWindowTextW(window_, wide(windowTitle()).c_str());
+        }
         InvalidateRect(window_, nullptr, FALSE);
+        return 0;
+    }
+    case ConfirmTransferMessage: {
+        std::unique_ptr<std::shared_ptr<TransferDecision>> payload(
+            reinterpret_cast<std::shared_ptr<TransferDecision>*>(lParam));
+        auto decision = *payload;
+        if (wParam != transferGeneration_ || !transfer_.active) { decision->result = 0; return 0; }
+        const auto message = std::wstring(decision->direction == TransferDirection::Upload ? L"上传 " : L"下载 ") +
+            std::to_wstring(decision->count) + L" 个文件（" + humanBytes(decision->bytes) + L"）？\n\n" +
+            L"来源：" + wide(decision->source) + L"\n目标：" + wide(decision->destination) +
+            L"\n\n完成后替换同名文件；未完成文件保留为临时文件。";
+        const int answer = MessageBoxW(window, message.c_str(), L"确认批量传输",
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        decision->result = answer == IDYES && wParam == transferGeneration_ ? 1 : 0;
         return 0;
     }
     case TransferMessage: {
@@ -451,6 +515,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
+    case WM_CLOSE: hideToTray(); return 0;
     case WM_DESTROY: {
         stopMonitor();
         stopTransfer();
@@ -460,18 +525,22 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         }
         // No producer can post now; release payloads already queued for this HWND.
         MSG pending{};
-        while (PeekMessageW(&pending, window, SnapshotMessage, TransferMessage, PM_REMOVE)) {
+        while (PeekMessageW(&pending, window, SnapshotMessage, ConfirmTransferMessage, PM_REMOVE)) {
             if (pending.message == SnapshotMessage)
                 delete reinterpret_cast<TelemetrySnapshot*>(pending.lParam);
-            else
+            else if (pending.message == TransferMessage)
                 delete reinterpret_cast<TransferProgress*>(pending.lParam);
+            else {
+                auto* decision = reinterpret_cast<std::shared_ptr<TransferDecision>*>(pending.lParam);
+                (*decision)->result = 0; delete decision;
+            }
         }
         KillTimer(window_, AnimationTimerId);
         window_ = nullptr;
         discardGraphics();
         if (config_.host.empty()) deleted_ = true;
         const auto open = servers();
-        if (std::none_of(open.begin(), open.end(), [](App* app) { return app->window_ != nullptr; }))
+        if (!root_->trayWindow_ && std::none_of(open.begin(), open.end(), [](App* app) { return app->window_ != nullptr; }))
             PostQuitMessage(0);
         return 0;
     }
@@ -515,10 +584,12 @@ void App::paint() {
     PAINTSTRUCT paint{};
     HDC paintDc = BeginPaint(window_, &paint);
     RECT client{}; GetClientRect(window_, &client);
-    HBRUSH background = CreateSolidBrush(RGB(background_ >> 16, (background_ >> 8) & 255, background_ & 255));
-    FillRect(paintDc, &client, background);
-    DeleteObject(background);
     if (!ensureGraphics()) {
+        // GDI is only a fallback. Clearing the visible HWND before EndDraw exposes
+        // a blank frame on every telemetry/progress update.
+        HBRUSH background = CreateSolidBrush(RGB(background_ >> 16, (background_ >> 8) & 255, background_ & 255));
+        FillRect(paintDc, &client, background);
+        DeleteObject(background);
         SetBkMode(paintDc, TRANSPARENT);
         SetTextColor(paintDc, RGB(foreground_ >> 16, (foreground_ >> 8) & 255, foreground_ & 255));
         const wchar_t* message = L"AirSFTP graphics initialization failed";
@@ -574,9 +645,11 @@ void App::paint() {
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(14, 16), 4, 4), statusBrush);
         drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(24, 1, 96, 31));
     } else {
-        drawText(renderTarget_, titleFormat_, textBrush_, wide(serverName_.empty() ? "AirSFTP" : serverName_), D2D1::RectF(18, 13, 140, 42));
+        drawText(renderTarget_, titleFormat_, textBrush_, wide(windowTitle()), D2D1::RectF(18, 13, 140, 42));
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
-        drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 265, 40));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 236, 40));
+        drawText(renderTarget_, compact, mutedBrush_, snapshot_.connected ? latency + L" ms" : L"—",
+            D2D1::RectF(238, 14, 300, 40));
         drawGearIcon(renderTarget_, d2dFactory_, mutedBrush_, surfaceBrush_, D2D1::Point2F(314, 27));
         drawText(renderTarget_, titleFormat_, mutedBrush_, L"×", D2D1::RectF(348, 9, 378, 42));
         renderTarget_->DrawLine(D2D1::Point2F(0, 49), D2D1::Point2F(MainWidth, 49), lineBrush_, 1);
@@ -585,11 +658,20 @@ void App::paint() {
 
     if (collapseMode_ == CollapseMode::Expanded) {
         auto card = [&](float x, float y, float width, const std::wstring& label,
-                        const std::wstring& value, float level, IDWriteTextFormat* valueFormat = nullptr) {
+                        const std::wstring& value, float level, IDWriteTextFormat* valueFormat = nullptr,
+                        const std::wstring& percentage = {}) {
             const auto box = D2D1::RoundedRect(D2D1::RectF(x, y, x + width, y + 66), 11, 11);
             renderTarget_->FillRoundedRectangle(box, surfaceBrush_);
             renderTarget_->DrawRoundedRectangle(box, lineBrush_, 1);
-            drawText(renderTarget_, labelFormat_, mutedBrush_, label, D2D1::RectF(x + 6, y + 8, x + width - 6, y + 27));
+            drawText(renderTarget_, labelFormat_, mutedBrush_, label,
+                D2D1::RectF(x + 6, y + 8, x + width - (percentage.empty() ? 6 : 40), y + 27));
+            if (!percentage.empty()) {
+                const auto alignment = labelFormat_->GetTextAlignment();
+                labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                drawText(renderTarget_, labelFormat_, mutedBrush_, percentage,
+                    D2D1::RectF(x + width - 40, y + 8, x + width - 6, y + 27));
+                labelFormat_->SetTextAlignment(alignment);
+            }
             drawText(renderTarget_, valueFormat ? valueFormat : metricFormat_, textBrush_, value,
                 D2D1::RectF(valueFormat ? x + 2 : x + 10, y + 26, valueFormat ? x + width - 2 : x + width - 8, y + 57));
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + width - 10, y + 61), 2, 2), lineBrush_);
@@ -599,16 +681,17 @@ void App::paint() {
         std::wstring cpu = snapshot_.packageTemperature >= 0 ? numberText(snapshot_.packageTemperature, L"°C") : L"—";
         std::wstring gpu = !snapshot_.gpus.empty() && snapshot_.gpus[0].temperature >= 0 ? numberText(snapshot_.gpus[0].temperature, L"°C") : L"—";
         const double gpuPower = snapshot_.gpus.empty() ? -1.0 : snapshot_.gpus[0].powerWatts;
-        card(14, 62, 82, powerLabel(L"CPU", L"CPU 封装", snapshot_.packagePowerWatts), cpu,
+        card(14, 62, 82, powerLabel(L"CPU", L"CPU·—W", snapshot_.packagePowerWatts), cpu,
             snapshot_.packageTemperature > 0 ? static_cast<float>(snapshot_.packageTemperature / 100.0) : 0);
         card(104, 62, 82, powerLabel(L"GPU", L"GPU", gpuPower), gpu,
             !snapshot_.gpus.empty() ? static_cast<float>(snapshot_.gpus[0].temperature / 100.0) : 0);
-        card(194, 62, 82, L"内存", snapshot_.memoryTotal ? numberText(ratio(snapshot_.memoryUsed, snapshot_.memoryTotal) * 100, L"%") : L"—", ratio(snapshot_.memoryUsed, snapshot_.memoryTotal));
+        card(194, 62, 82, L"内存", snapshot_.memoryTotal ? storageText(snapshot_.memoryUsed) : L"—",
+            ratio(snapshot_.memoryUsed, snapshot_.memoryTotal), compactFormat_,
+            snapshot_.memoryTotal ? numberText(ratio(snapshot_.memoryUsed, snapshot_.memoryTotal) * 100, L"%") : L"—");
         card(284, 62, 82, L"存储", snapshot_.diskTotal ? storageText(snapshot_.diskUsed) : L"—",
-            ratio(snapshot_.diskUsed, snapshot_.diskTotal), compactFormat_);
+            ratio(snapshot_.diskUsed, snapshot_.diskTotal), compactFormat_,
+            snapshot_.diskTotal ? numberText(ratio(snapshot_.diskUsed, snapshot_.diskTotal) * 100, L"%") : L"—");
 
-        const auto sampleSeconds = std::chrono::duration_cast<std::chrono::seconds>(
-            snapshot_.sampledAt.time_since_epoch()).count();
         std::vector<double> coreTemperatures;
         coreTemperatures.reserve(snapshot_.coreTemperatures.size());
         for (const auto& sensor : snapshot_.coreTemperatures) {
@@ -633,34 +716,57 @@ void App::paint() {
             }
         }
 
-        std::wstring fan = L"风扇 ";
-        if (!snapshot_.fans.empty()) {
-            const auto index = static_cast<std::size_t>((sampleSeconds / 6) % snapshot_.fans.size());
-            fan += wide(snapshot_.fans[index].label) + L" " + numberText(snapshot_.fans[index].value, L" RPM");
-        } else {
-            fan += L"—";
-        }
+        const double fanPercent = snapshot_.gpus.empty() ? -1.0 : snapshot_.gpus[0].fanPercent;
+        const std::wstring fan = L"GPU风扇 " + (std::isfinite(fanPercent) && fanPercent >= 0.0 && fanPercent <= 100.0
+            ? numberText(fanPercent, L"%") : L"—");
+        const std::wstring ssd = L"SSD温度 " + (std::isfinite(snapshot_.ssdTemperature) && snapshot_.ssdTemperature >= 0.0
+            ? numberText(snapshot_.ssdTemperature, L"°C") : L"—");
+        std::wstring vram = L"显存占用 —";
+        double memoryClock = -1.0;
         if (!snapshot_.gpus.empty()) {
-            const auto& gpuFan = snapshot_.gpus[0];
-            if (gpuFan.fanRpm > 0)
-                fan += L"    GPU " + numberText(gpuFan.fanRpm, L" RPM");
-            else if (gpuFan.fanPercent > 0)
-                fan += L"    GPU " + numberText(gpuFan.fanPercent, L"%");
+            const auto& device = snapshot_.gpus[0];
+            memoryClock = device.memoryClockMHz;
+            if (device.memoryTotal && device.memoryUsed <= device.memoryTotal) {
+                wchar_t usage[80]{};
+                swprintf(usage, 80, L"显存占用 %.2fGB-%.0f%%",
+                    static_cast<double>(device.memoryUsed) / (1024.0 * 1024 * 1024),
+                    100.0 * static_cast<double>(device.memoryUsed) / device.memoryTotal);
+                vram = usage;
+            }
         }
-        drawText(renderTarget_, labelFormat_, mutedBrush_, fan, D2D1::RectF(18, 164, 260, 186));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, L"SSH " + numberText(snapshot_.sshLatencyMs, L" ms"), D2D1::RectF(270, 164, 360, 186));
+        const std::wstring memoryRate = L"内存频率 " + (snapshot_.memoryRateMTs
+            ? std::to_wstring(snapshot_.memoryRateMTs) + L"MT/s" : L"—");
+        const std::wstring vramClock = L"显存频率 " + (std::isfinite(memoryClock) && memoryClock >= 0.0
+            ? numberText(memoryClock, L"MHz") : L"—");
+        drawText(renderTarget_, labelFormat_, mutedBrush_, fan, D2D1::RectF(18, 164, 132, 186));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, vram, D2D1::RectF(140, 164, 362, 186));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, ssd, D2D1::RectF(18, 188, 123, 210));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, memoryRate, D2D1::RectF(130, 188, 250, 210));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, vramClock, D2D1::RectF(256, 188, 366, 210));
 
-        renderTarget_->DrawLine(D2D1::Point2F(14, 194), D2D1::Point2F(366, 194), lineBrush_, 1);
-        drawText(renderTarget_, titleFormat_, textBrush_, L"↓ " + humanBytes(snapshot_.networkDown, true), D2D1::RectF(18, 204, 180, 232));
-        drawText(renderTarget_, titleFormat_, textBrush_, L"↑ " + humanBytes(snapshot_.networkUp, true), D2D1::RectF(198, 204, 360, 232));
+        renderTarget_->DrawLine(D2D1::Point2F(14, 216), D2D1::Point2F(366, 216), lineBrush_, 1);
+        drawText(renderTarget_, labelFormat_, mutedBrush_, L"↓ 下载", D2D1::RectF(18, 220, 128, 237));
+        drawText(renderTarget_, labelFormat_, mutedBrush_, L"↑ 上传", D2D1::RectF(136, 220, 246, 237));
+        const auto labelAlignment = labelFormat_->GetTextAlignment();
+        labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        drawText(renderTarget_, labelFormat_, mutedBrush_, L"网卡", D2D1::RectF(254, 220, 362, 237));
+        labelFormat_->SetTextAlignment(labelAlignment);
+        const auto valueAlignment = compact->GetTextAlignment();
+        compact->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        drawText(renderTarget_, compact, textBrush_, humanBytes(snapshot_.networkDown, true), D2D1::RectF(18, 237, 128, 261));
+        drawText(renderTarget_, compact, textBrush_, humanBytes(snapshot_.networkUp, true), D2D1::RectF(136, 237, 246, 261));
+        compact->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        drawText(renderTarget_, compact, textBrush_, snapshot_.connected ? linkSpeedText(snapshot_.networkLinkMbps) : L"—",
+            D2D1::RectF(254, 237, 362, 261));
+        compact->SetTextAlignment(valueAlignment);
 
         if (transfer_.active || transfer_.completed || transfer_.failed) {
             const float progressValue = transfer_.completed ? 1.0f : ratio(transfer_.transferred, transfer_.total);
-            drawText(renderTarget_, labelFormat_, textBrush_, wide((transfer_.filesTotal ? std::to_string(transfer_.filesCompleted) + "/" +
-                std::to_string(transfer_.filesTotal) + " " : "") + transfer_.fileName), D2D1::RectF(18, 236, 210, 253));
-            drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? humanBytes(transfer_.bytesPerSecond, true) : wide(transfer_.message), D2D1::RectF(220, 236, 360, 253));
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 362, 263), 3, 3), lineBrush_);
-            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 258, 18 + 344 * progressValue, 263), 3, 3), accentBrush_);
+            drawText(renderTarget_, labelFormat_, textBrush_, (transfer_.direction == TransferDirection::Upload ? L"↑ " : L"↓ ") + wide((transfer_.filesTotal ? std::to_string(transfer_.filesCompleted) + "/" +
+                std::to_string(transfer_.filesTotal) + " " : "") + transfer_.fileName), D2D1::RectF(18, 266, 210, 283));
+            drawText(renderTarget_, labelFormat_, mutedBrush_, transfer_.active ? (transfer_.message == "Verifying partial file" ? L"校验断点…" : humanBytes(transfer_.bytesPerSecond, true)) : wide(transfer_.message), D2D1::RectF(220, 266, 360, 283));
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 288, 362, 293), 3, 3), lineBrush_);
+            renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(18, 288, 18 + 344 * progressValue, 293), 3, 3), accentBrush_);
         }
     }
     textBrush_->SetOpacity(1.0f);
@@ -966,14 +1072,14 @@ void App::rebuildSettingsFonts(UINT dpi) {
     HFONT oldTitle = settingsTitleFont_;
     HFONT oldLabel = settingsLabelFont_;
     HFONT oldButton = settingsButtonFont_;
-    uiFont_ = makeFont(14, FW_NORMAL);
-    settingsTitleFont_ = makeFont(18, FW_SEMIBOLD);
+    uiFont_ = makeFont(13, FW_NORMAL);
+    settingsTitleFont_ = makeFont(17, FW_SEMIBOLD);
     settingsLabelFont_ = makeFont(12, FW_NORMAL);
     settingsButtonFont_ = makeFont(13, FW_SEMIBOLD);
 
     if (settingsWindow_) {
         constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
-        constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton, NewServer, ReopenServers, DeleteServer, BackgroundColor, ForegroundColor};
+        constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton, NewServer, ReopenServers, DeleteServer, BackgroundColor, ForegroundColor, OpenLocalFolder, CancelTransfer, ConnectionTab, TransferTab, AppearanceTab};
         for (int id : edits)
             SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
                 reinterpret_cast<WPARAM>(uiFont_), TRUE);
@@ -992,172 +1098,173 @@ void App::rebuildSettingsFonts(UINT dpi) {
 
 void App::layoutSettings(UINT dpi) {
     if (!settingsWindow_) return;
-    auto p = [dpi](int value) { return pixels(value, dpi); };
-    auto move = [&](int id, int x, int y, int width, int height) {
-        MoveWindow(GetDlgItem(settingsWindow_, id), p(x), p(y), p(width), p(height), TRUE);
+    auto p = [dpi](int v) { return pixels(v, dpi); };
+    auto move = [&](int id, int x, int y, int w, int h) {
+        MoveWindow(GetDlgItem(settingsWindow_, id), p(x), p(y), p(w), p(h), FALSE);
     };
-    move(HostEdit, 34, 88, 294, 22);
-    move(PortEdit, 360, 88, 86, 22);
-    move(UserEdit, 34, 150, 156, 22);
-    move(PasswordEdit, 222, 150, 224, 22);
-    move(KeyEdit, 34, 212, 412, 22);
-    move(LocalEdit, 34, 274, 326, 22);
-    move(BrowseLocal, 380, 268, 76, 34);
-    move(RemoteEdit, 34, 336, 412, 22);
-    move(EntireFolder, 24, 371, 170, 24);
-    move(SelectedFiles, 210, 371, 220, 24);
-    move(ServerName, 34, 432, 190, 24);
-    move(BackgroundColor, 236, 429, 104, 32);
-    move(ForegroundColor, 350, 429, 106, 32);
-    move(NextHotkey, 24, 490, 208, 28);
-    move(PreviousHotkey, 248, 490, 208, 28);
-    move(NewServer, 24, 540, 132, 34);
-    move(ReopenServers, 166, 540, 148, 34);
-    move(DeleteServer, 324, 540, 132, 34);
-    move(SaveConnect, 162, 596, 126, 38);
-    move(UploadButton, 296, 596, 76, 38);
-    move(DownloadButton, 380, 596, 76, 38);
-
-    constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
-    for (int id : edits) {
-        HWND edit = GetDlgItem(settingsWindow_, id);
-        SendMessageW(edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-            MAKELPARAM(p(2), p(2)));
-    }
+    move(ConnectionTab, 24, 76, 140, 32);
+    move(TransferTab, 170, 76, 140, 32);
+    move(AppearanceTab, 316, 76, 140, 32);
+    move(ServerName, 36, 161, 408, 22);
+    move(HostEdit, 36, 231, 286, 22);
+    move(PortEdit, 352, 231, 92, 22);
+    move(UserEdit, 36, 301, 180, 22);
+    move(PasswordEdit, 260, 301, 184, 22);
+    move(KeyEdit, 36, 371, 408, 22);
+    move(NewServer, 24, 433, 132, 32);
+    move(ReopenServers, 174, 433, 132, 32);
+    move(DeleteServer, 324, 433, 132, 32);
+    move(LocalEdit, 36, 161, 238, 22);
+    move(BrowseLocal, 294, 155, 72, 34);
+    move(OpenLocalFolder, 378, 155, 66, 34);
+    move(RemoteEdit, 36, 241, 408, 22);
+    move(EntireFolder, 30, 310, 174, 34);
+    move(SelectedFiles, 212, 310, 238, 34);
+    move(BackgroundColor, 30, 156, 198, 46);
+    move(ForegroundColor, 252, 156, 198, 46);
+    move(NextHotkey, 36, 274, 408, 24);
+    move(PreviousHotkey, 36, 354, 408, 24);
+    move(CancelTransfer, 24, 496, 116, 34);
+    move(UploadButton, 234, 496, 104, 34);
+    move(DownloadButton, 350, 496, 106, 34);
+    move(SaveConnect, 300, 496, 156, 34);
+    constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit,
+        LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
+    for (int id : edits) SendDlgItemMessageW(settingsWindow_, id, EM_SETMARGINS,
+        EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(p(2), p(2)));
+    selectSettingsTab(settingsTab_);
 }
 
-void App::paintSettings() {
+void App::selectSettingsTab(int tab) {
+    settingsTab_ = std::clamp(tab, 0, 2);
+    auto visible = [&](int id, bool show) {
+        ShowWindow(GetDlgItem(settingsWindow_, id), show ? SW_SHOWNA : SW_HIDE);
+    };
+    for (int id : {ServerName, HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit,
+        NewServer, ReopenServers, DeleteServer}) visible(id, settingsTab_ == 0);
+    for (int id : {LocalEdit, RemoteEdit, BrowseLocal, OpenLocalFolder, EntireFolder,
+        SelectedFiles, UploadButton, DownloadButton, CancelTransfer}) visible(id, settingsTab_ == 1);
+    for (int id : {BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey})
+        visible(id, settingsTab_ == 2);
+    visible(SaveConnect, settingsTab_ != 1);
+    RedrawWindow(settingsWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+void App::paintSettings(HDC destination) {
     PAINTSTRUCT paint{};
-    HDC target = BeginPaint(settingsWindow_, &paint);
+    HDC target = destination ? destination : BeginPaint(settingsWindow_, &paint);
     RECT client{};
     GetClientRect(settingsWindow_, &client);
     HDC buffer = CreateCompatibleDC(target);
     HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
     HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
-    const UINT dpi = GetDpiForWindow(settingsWindow_);
-    auto p = [dpi](int value) { return pixels(value, dpi); };
-
-    HBRUSH background = CreateSolidBrush(RGB(246, 246, 248));
-    FillRect(buffer, &client, background);
-    DeleteObject(background);
-    RECT header{0, 0, client.right, p(SettingsHeaderHeight)};
-    HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(buffer, &header, white);
-
-    HPEN separator = CreatePen(PS_SOLID, std::max(1, p(1)), RGB(229, 229, 234));
-    HGDIOBJ oldPen = SelectObject(buffer, separator);
-    MoveToEx(buffer, 0, p(SettingsHeaderHeight) - 1, nullptr);
-    LineTo(buffer, client.right, p(SettingsHeaderHeight) - 1);
-
-    HPEN fieldPen = CreatePen(PS_SOLID, std::max(1, p(1)), RGB(218, 218, 223));
-    SelectObject(buffer, fieldPen);
-    HGDIOBJ oldBrush = SelectObject(buffer, white);
-    auto field = [&](int x, int y, int width, int height) {
-        RoundRect(buffer, p(x), p(y), p(x + width), p(y + height), p(10), p(10));
-    };
-    field(24, 82, 314, 34);
-    field(350, 82, 106, 34);
-    field(24, 144, 176, 34);
-    field(212, 144, 244, 34);
-    field(24, 206, 432, 34);
-    field(24, 268, 346, 34);
-    field(24, 330, 432, 34);
-    field(24, 428, 204, 34);
-
+    const UINT dpi = settingsLayoutDpi_;
+    auto p = [dpi](int v) { return pixels(v, dpi); };
+    const auto bg = settingsColor(background_), fg = settingsColor(foreground_);
+    const auto line = blendColor(bg, fg, 0.14f), muted = blendColor(bg, fg, 0.62f);
+    HBRUSH surface = CreateSolidBrush(bg);
+    HBRUSH fieldBrush = CreateSolidBrush(blendColor(bg, fg, 0.035f));
+    FillRect(buffer, &client, surface);
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, p(1)), line);
+    HGDIOBJ oldPen = SelectObject(buffer, pen);
+    HGDIOBJ oldBrush = SelectObject(buffer, surface);
+    RoundRect(buffer, 0, 0, client.right, client.bottom, p(24), p(24));
     SetBkMode(buffer, TRANSPARENT);
-    SetTextColor(buffer, RGB(29, 29, 31));
     HGDIOBJ oldFont = SelectObject(buffer, settingsTitleFont_);
-    RECT title{p(22), p(9), p(340), p(45)};
-    DrawTextW(buffer, L"连接与传输", -1, &title, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-
-    HBRUSH closeBrush = CreateSolidBrush(RGB(241, 241, 244));
-    SelectObject(buffer, GetStockObject(NULL_PEN));
-    SelectObject(buffer, closeBrush);
-    Ellipse(buffer, p(437), p(12), p(465), p(40));
-    SelectObject(buffer, settingsButtonFont_);
-    SetTextColor(buffer, RGB(110, 110, 115));
-    RECT closeRect{p(437), p(11), p(465), p(40)};
-    DrawTextW(buffer, L"×", -1, &closeRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    SelectObject(buffer, white);
-    DeleteObject(closeBrush);
-
-    SelectObject(buffer, settingsLabelFont_);
-    SetTextColor(buffer, RGB(110, 110, 115));
-    auto label = [&](const wchar_t* value, int x, int y, int width) {
-        RECT rect{p(x), p(y), p(x + width), p(y + 18)};
-        DrawTextW(buffer, value, -1, &rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    auto text = [&](const std::wstring& value, int x, int y, int w, int h, COLORREF color) {
+        SetTextColor(buffer, color);
+        RECT rect{p(x), p(y), p(x + w), p(y + h)};
+        DrawTextW(buffer, value.c_str(), -1, &rect,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
     };
-    label(L"服务器名称", 24, 408, 204);
-    label(L"切换到下一个窗口（全局）", 24, 469, 208);
-    label(L"切换到上一个窗口（全局）", 248, 469, 208);
-    label(L"主机", 24, 61, 314);
-    label(L"端口", 350, 61, 106);
-    label(L"用户名", 24, 123, 176);
-    label(L"密码 / 密钥口令", 212, 123, 244);
-    label(L"私钥文件（可选）", 24, 185, 432);
-    label(L"本地文件夹", 24, 247, 346);
-    label(L"远程文件夹", 24, 309, 432);
-
-    SetTextColor(buffer, RGB(142, 142, 147));
-    RECT note{p(24), p(575), p(456), p(593)};
-    DrawTextW(buffer, L"保留子目录结构 · 同名文件覆盖 · 不跟随符号链接", -1, &note,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-
+    text(L"服务器设置", 24, 14, 370, 26, fg);
+    SelectObject(buffer, settingsLabelFont_);
+    text(wide(windowTitle()), 24, 42, 392, 20, muted);
+    RECT close{p(430), p(16), p(456), p(44)};
+    SetTextColor(buffer, muted);
+    DrawTextW(buffer, L"×", -1, &close, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    SelectObject(buffer, fieldBrush);
+    auto field = [&](int x, int y, int w, int h = 34) {
+        RoundRect(buffer, p(x), p(y), p(x + w), p(y + h), p(12), p(12));
+    };
+    if (settingsTab_ == 0) {
+        text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
+        text(L"主机地址", 30, 202, 290, 20, muted); field(30, 225, 298);
+        text(L"端口", 346, 202, 100, 20, muted); field(346, 225, 104);
+        text(L"用户名", 30, 272, 190, 20, muted); field(30, 295, 192);
+        text(L"密码 / 密钥口令", 254, 272, 196, 20, muted); field(254, 295, 196);
+        text(L"私钥路径 · 可选", 30, 342, 420, 20, muted); field(30, 365, 420);
+    } else if (settingsTab_ == 1) {
+        text(L"本机文件夹", 30, 132, 420, 20, muted); field(30, 155, 250);
+        text(L"服务器文件夹", 30, 212, 420, 20, muted); field(30, 235, 420);
+        text(L"传输范围", 30, 284, 420, 20, muted);
+        text(L"上传：本机 → 服务器", 30, 366, 420, 24, fg);
+        text(L"下载：服务器 → 本机", 30, 394, 420, 24, fg);
+        text(L"支持断点续传，超过 5 个文件时再次确认", 30, 436, 420, 22, muted);
+    } else {
+        text(L"窗口配色", 30, 128, 420, 20, muted);
+        text(L"浮窗、收起状态与设置页使用同一配色", 30, 212, 420, 20, muted);
+        text(L"下一个服务器窗口", 30, 244, 420, 20, muted); field(30, 268, 420, 36);
+        text(L"上一个服务器窗口", 30, 324, 420, 20, muted); field(30, 348, 420, 36);
+        text(L"点击输入框录入组合键，至少包含 Ctrl 或 Alt", 30, 402, 420, 22, muted);
+    }
+    MoveToEx(buffer, p(24), p(480), nullptr); LineTo(buffer, p(456), p(480));
+    if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" : L"连接信息仅用于当前服务器", 24, 500, 264, 26, muted);
     SelectObject(buffer, oldFont);
     SelectObject(buffer, oldBrush);
     SelectObject(buffer, oldPen);
-    DeleteObject(fieldPen);
-    DeleteObject(separator);
-    DeleteObject(white);
+    DeleteObject(pen); DeleteObject(surface); DeleteObject(fieldBrush);
     BitBlt(target, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
-    SelectObject(buffer, oldBitmap);
-    DeleteObject(bitmap);
-    DeleteDC(buffer);
-    EndPaint(settingsWindow_, &paint);
+    SelectObject(buffer, oldBitmap); DeleteObject(bitmap); DeleteDC(buffer);
+    if (!destination) EndPaint(settingsWindow_, &paint);
 }
 
 void App::drawSettingsButton(const DRAWITEMSTRUCT& item) {
+    const bool tab = item.CtlID >= ConnectionTab && item.CtlID <= AppearanceTab;
+    const bool choice = item.CtlID == EntireFolder || item.CtlID == SelectedFiles;
+    const bool selected = (tab && int(item.CtlID - ConnectionTab) == settingsTab_) ||
+        (choice && ((item.CtlID == SelectedFiles) == partialTransfer_));
     const bool primary = item.CtlID == SaveConnect;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
     const bool focused = (item.itemState & ODS_FOCUS) != 0;
-    const UINT dpi = GetDpiForWindow(settingsWindow_);
-    auto p = [dpi](int value) { return pixels(value, dpi); };
-    COLORREF fill = primary ? RGB(0, 122, 255) : RGB(255, 255, 255);
-    COLORREF border = primary ? RGB(0, 122, 255) : RGB(209, 209, 214);
-    COLORREF textColor = primary ? RGB(255, 255, 255) : RGB(0, 113, 227);
-    if (pressed) fill = primary ? RGB(0, 101, 214) : RGB(236, 243, 252);
-    if (disabled) {
-        fill = RGB(235, 235, 238);
-        border = RGB(222, 222, 226);
-        textColor = RGB(160, 160, 165);
-    }
-    if (focused && !primary) border = RGB(0, 122, 255);
-
+    auto p = [this](int v) { return pixels(v, settingsLayoutDpi_); };
+    const auto bg = settingsColor(background_), fg = settingsColor(foreground_);
+    const COLORREF accent = RGB(8, 127, 245);
+    COLORREF fill = primary ? accent : blendColor(bg, selected ? accent : fg, selected ? 0.14f : 0.035f);
+    COLORREF border = primary || focused || selected ? accent : blendColor(bg, fg, 0.14f);
+    COLORREF color = primary ? RGB(255, 255, 255) : fg;
+    if (item.CtlID == DeleteServer) color = RGB(218, 76, 76);
+    if (pressed) fill = blendColor(fill, fg, 0.10f);
+    if (disabled) { fill = bg; color = blendColor(bg, fg, 0.35f); }
+    SetDCBrushColor(item.hDC, bg);
+    FillRect(item.hDC, &item.rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
     HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, focused ? std::max(1, p(2)) : std::max(1, p(1)), border);
-    HGDIOBJ oldBrush = SelectObject(item.hDC, brush);
-    HGDIOBJ oldPen = SelectObject(item.hDC, pen);
-    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom,
-        p(10), p(10));
-    SetBkMode(item.hDC, TRANSPARENT);
-    SetTextColor(item.hDC, textColor);
-    HGDIOBJ oldFont = SelectObject(item.hDC, settingsButtonFont_);
+    HPEN pen = CreatePen(PS_SOLID, std::max(1, p(focused ? 2 : 1)), border);
+    auto oldBrush = SelectObject(item.hDC, brush), oldPen = SelectObject(item.hDC, pen);
+    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, p(12), p(12));
+    SetBkMode(item.hDC, TRANSPARENT); SetTextColor(item.hDC, color);
+    auto oldFont = SelectObject(item.hDC, settingsButtonFont_);
     wchar_t text[64]{};
     GetWindowTextW(item.hwndItem, text, 64);
     RECT textRect = item.rcItem;
+    if (item.CtlID == BackgroundColor || item.CtlID == ForegroundColor) {
+        HBRUSH swatch = CreateSolidBrush(item.CtlID == BackgroundColor ? bg : fg);
+        SelectObject(item.hDC, swatch);
+        Ellipse(item.hDC, p(16), p(14), p(34), p(32));
+        SelectObject(item.hDC, brush); DeleteObject(swatch);
+        textRect.left += p(26);
+    }
     if (pressed) OffsetRect(&textRect, 0, p(1));
-    DrawTextW(item.hDC, text, -1, &textRect,
-        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    SelectObject(item.hDC, oldFont);
-    SelectObject(item.hDC, oldPen);
-    SelectObject(item.hDC, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    DrawTextW(item.hDC, text, -1, &textRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    SelectObject(item.hDC, oldFont); SelectObject(item.hDC, oldPen); SelectObject(item.hDC, oldBrush);
+    DeleteObject(pen); DeleteObject(brush);
 }
 
 void App::createSettingsWindow() {
     const UINT dpi = GetDpiForWindow(window_);
+    settingsLayoutDpi_ = dpi;
+    settingsLoaded_ = false;
     settingsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, SettingsClass, L"AirSFTP 设置",
         WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         pixels(SettingsWidth, dpi), pixels(SettingsHeight, dpi),
@@ -1168,6 +1275,9 @@ void App::createSettingsWindow() {
     DwmSetWindowAttribute(settingsWindow_, cornerAttribute, &roundPreference, sizeof(roundPreference));
     rebuildSettingsFonts(dpi);
 
+    addControl(settingsWindow_, WC_BUTTONW, L"连接", BS_OWNERDRAW, 0, 0, 1, 1, ConnectionTab, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"文件传输", BS_OWNERDRAW, 0, 0, 1, 1, TransferTab, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"外观", BS_OWNERDRAW, 0, 0, 1, 1, AppearanceTab, settingsButtonFont_);
     HWND host = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, HostEdit, uiFont_);
     HWND port = addControl(settingsWindow_, WC_EDITW, L"22", ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 1, 1, PortEdit, uiFont_);
     HWND user = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, UserEdit, uiFont_);
@@ -1176,15 +1286,17 @@ void App::createSettingsWindow() {
     HWND local = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, LocalEdit, uiFont_);
     HWND remote = addControl(settingsWindow_, WC_EDITW, L"/tmp/", ES_AUTOHSCROLL, 0, 0, 1, 1, RemoteEdit, uiFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"浏览", BS_OWNERDRAW, 0, 0, 1, 1, BrowseLocal, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"打开", BS_OWNERDRAW, 0, 0, 1, 1, OpenLocalFolder, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"停止传输", BS_OWNERDRAW, 0, 0, 1, 1, CancelTransfer, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"连接并监控", BS_OWNERDRAW, 0, 0, 1, 1, SaveConnect, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"上传", BS_OWNERDRAW, 0, 0, 1, 1, UploadButton, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"下载", BS_OWNERDRAW, 0, 0, 1, 1, DownloadButton, settingsButtonFont_);
 
-    addControl(settingsWindow_, WC_BUTTONW, L"整个文件夹", WS_GROUP | BS_AUTORADIOBUTTON,
+    addControl(settingsWindow_, WC_BUTTONW, L"整个文件夹", WS_GROUP | BS_OWNERDRAW,
         0, 0, 1, 1, EntireFolder, uiFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"选择部分文件 / 子目录", BS_AUTORADIOBUTTON,
+    addControl(settingsWindow_, WC_BUTTONW, L"选择文件 / 子目录", BS_OWNERDRAW,
         0, 0, 1, 1, SelectedFiles, uiFont_);
-    SendDlgItemMessageW(settingsWindow_, EntireFolder, BM_SETCHECK, BST_CHECKED, 0);
+    partialTransfer_ = false;
 
     SendMessageW(host, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.1.10"));
     SendMessageW(port, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"22"));
@@ -1205,30 +1317,153 @@ void App::createSettingsWindow() {
     addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, PreviousHotkey, uiFont_);
     layoutSettings(dpi);
 }
+void App::positionSettings() {
+    RECT owner{};
+    GetWindowRect(window_, &owner);
+    MONITORINFO monitor{sizeof(monitor)};
+    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+    const auto work = monitor.rcWork;
+    const UINT nativeDpi = GetDpiForWindow(window_);
+    settingsLayoutDpi_ = std::max(48, std::min({int(nativeDpi),
+        MulDiv(int(work.right - work.left) - 24, 96, SettingsWidth),
+        MulDiv(int(work.bottom - work.top) - 24, 96, SettingsHeight)}));
+    const int w = pixels(SettingsWidth, settingsLayoutDpi_), h = pixels(SettingsHeight, settingsLayoutDpi_);
+    const int gap = pixels(12, settingsLayoutDpi_);
+    POINT gear{pixels(314, nativeDpi), pixels(27, nativeDpi)};
+    if (isCollapsed()) gear = {int(owner.right - owner.left) / 2, int(owner.bottom - owner.top) / 2};
+    ClientToScreen(window_, &gear);
+    const POINT candidates[] = {
+        {owner.right + gap, owner.bottom - h}, {owner.left - gap - w, owner.bottom - h},
+        {owner.right - w, owner.top - gap - h}, {owner.right - w, owner.bottom + gap}
+    };
+    RECT chosen{};
+    long long best = LLONG_MAX;
+    for (const auto& point : candidates) {
+        const int x = std::clamp(int(point.x), int(work.left), std::max(int(work.left), int(work.right) - w));
+        const int y = std::clamp(int(point.y), int(work.top), std::max(int(work.top), int(work.bottom) - h));
+        RECT box{x, y, x + w, y + h};
+        long long score = std::abs(x - int(point.x)) + std::abs(y - int(point.y));
+        auto penalize = [&](HWND window) {
+            if (!window || !IsWindowVisible(window)) return;
+            RECT bounds{}, overlap{};
+            GetWindowRect(window, &bounds);
+            if (IntersectRect(&overlap, &bounds, &box))
+                score += 100LL * (overlap.right - overlap.left) * (overlap.bottom - overlap.top);
+        };
+        for (auto* server : servers()) {
+            penalize(server->window_);
+            if (server->settingsWindow_ != settingsWindow_) penalize(server->settingsWindow_);
+        }
+        if (score < best) { best = score; chosen = box; }
+    }
+    SetWindowPos(settingsWindow_, HWND_TOP, chosen.left, chosen.top, w, h, SWP_NOACTIVATE);
+    // Moving across displays may dispatch WM_DPICHANGED; apply the fitted layout afterward.
+    settingsLayoutDpi_ = std::max(48, std::min({int(nativeDpi),
+        MulDiv(int(work.right - work.left) - 24, 96, SettingsWidth),
+        MulDiv(int(work.bottom - work.top) - 24, 96, SettingsHeight)}));
+    rebuildSettingsFonts(settingsLayoutDpi_);
+    layoutSettings(settingsLayoutDpi_);
+    settingsAnimationOrigin_ = {std::clamp(int(gear.x - chosen.left), 0, w),
+        std::clamp(int(gear.y - chosen.top), 0, h)};
+}
+
+void App::finishSettingsAnimation() {
+    if (!settingsWindow_) return;
+    KillTimer(settingsWindow_, SettingsAnimationTimerId);
+    const bool closing = settingsClosing_;
+    settingsAnimating_ = false;
+    settingsClosing_ = false;
+    settingsReveal_ = closing ? 0.0f : 1.0f;
+    // Hide before removing the clip, otherwise a closing panel flashes full-size.
+    if (closing) ShowWindow(settingsWindow_, SW_HIDE);
+    SetWindowRgn(settingsWindow_, nullptr, TRUE);
+}
+
+void App::tickSettingsAnimation() {
+    if (!settingsAnimating_ || !settingsWindow_) return;
+    const float t = std::min(1.0f, float(GetTickCount64() - settingsAnimationStarted_) / 200.0f);
+    if (t >= 1.0f) { finishSettingsAnimation(); return; }
+    const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+    const float target = settingsClosing_ ? 0.0f : 1.0f;
+    settingsReveal_ = settingsAnimationFrom_ + (target - settingsAnimationFrom_) * eased;
+    const float reveal = settingsReveal_;
+    RECT client{}; GetClientRect(settingsWindow_, &client);
+    const int left = int(settingsAnimationOrigin_.x * (1.0f - reveal));
+    const int top = int(settingsAnimationOrigin_.y * (1.0f - reveal));
+    const int right = std::max(left + 1, int(settingsAnimationOrigin_.x +
+        (client.right - settingsAnimationOrigin_.x) * reveal));
+    const int bottom = std::max(top + 1, int(settingsAnimationOrigin_.y +
+        (client.bottom - settingsAnimationOrigin_.y) * reveal));
+    HRGN clip = CreateRoundRectRgn(left, top, right, bottom,
+        pixels(18, settingsLayoutDpi_), pixels(18, settingsLayoutDpi_));
+    if (!SetWindowRgn(settingsWindow_, clip, TRUE)) DeleteObject(clip);
+}
+
+void App::startSettingsAnimation(bool opening) {
+    if (!settingsWindow_) return;
+    if (settingsAnimating_) tickSettingsAnimation();
+    settingsClosing_ = !opening;
+    settingsAnimationFrom_ = settingsReveal_;
+    settingsAnimationStarted_ = GetTickCount64();
+    BOOL animations = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+    if (!animations) { finishSettingsAnimation(); return; }
+    settingsAnimating_ = true;
+    tickSettingsAnimation();
+    if (!SetTimer(settingsWindow_, SettingsAnimationTimerId, 15, nullptr)) finishSettingsAnimation();
+}
+
+void App::hideSettings(bool animate) {
+    if (!settingsWindow_ || !IsWindowVisible(settingsWindow_)) return;
+    if (!animate) {
+        settingsClosing_ = true;
+        finishSettingsAnimation();
+    } else if (!settingsClosing_) {
+        startSettingsAnimation(false);
+    }
+}
+
+void App::toggleSettings() {
+    if (settingsWindow_ && IsWindowVisible(settingsWindow_) && !settingsClosing_)
+        hideSettings();
+    else showSettings();
+}
+
+bool App::isSettingsRelatedWindow(HWND target) const {
+    // Native color/file pickers and message boxes are owned by the panel.
+    for (HWND current = target; current; current = GetWindow(current, GW_OWNER))
+        if (current == settingsWindow_ || IsChild(settingsWindow_, current)) return true;
+    return false;
+}
+
 void App::showSettings() {
     if (!settingsWindow_) createSettingsWindow();
     if (!settingsWindow_) return;
-    SetWindowTextW(GetDlgItem(settingsWindow_, ServerName), wide(serverName_).c_str());
-    SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_SETHOTKEY, root_->nextHotkey_, 0);
-    SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, root_->previousHotkey_, 0);
-    SetWindowTextW(GetDlgItem(settingsWindow_, HostEdit), wide(config_.host).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, PortEdit), std::to_wstring(config_.port).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, UserEdit), wide(config_.username).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, PasswordEdit), wide(config_.password).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, KeyEdit), wide(config_.privateKeyPath).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, LocalEdit), wide(localPath_).c_str());
-    SetWindowTextW(GetDlgItem(settingsWindow_, RemoteEdit), wide(remotePath_.empty() ? "/tmp/" : remotePath_).c_str());
-    RECT owner{}, dialog{}; GetWindowRect(window_, &owner); GetWindowRect(settingsWindow_, &dialog);
-    const UINT dpi = GetDpiForWindow(settingsWindow_);
-    MONITORINFO monitor{sizeof(monitor)};
-    GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
-    const int dialogWidth = dialog.right - dialog.left;
-    const int dialogHeight = dialog.bottom - dialog.top;
-    const int desiredX = owner.left + ((owner.right - owner.left) - dialogWidth) / 2;
-    const int desiredY = owner.top + ((owner.bottom - owner.top) - dialogHeight) / 2;
-    const int x = std::clamp(desiredX, static_cast<int>(monitor.rcWork.left), std::max(static_cast<int>(monitor.rcWork.left), static_cast<int>(monitor.rcWork.right) - dialogWidth));
-    const int y = std::clamp(desiredY, static_cast<int>(monitor.rcWork.top), std::max(static_cast<int>(monitor.rcWork.top), static_cast<int>(monitor.rcWork.bottom) - dialogHeight));
-    SetWindowPos(settingsWindow_, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+    if (IsWindowVisible(settingsWindow_)) {
+        if (settingsClosing_) {
+            startSettingsAnimation(true);
+            ShowWindow(settingsWindow_, SW_SHOWNORMAL);
+        } else finishSettingsAnimation();
+        SetForegroundWindow(settingsWindow_);
+        return;
+    }
+    if (!settingsLoaded_) {
+        SetWindowTextW(GetDlgItem(settingsWindow_, ServerName), wide(serverName_).c_str());
+        SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_SETHOTKEY, root_->nextHotkey_, 0);
+        SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, root_->previousHotkey_, 0);
+        SetWindowTextW(GetDlgItem(settingsWindow_, HostEdit), wide(config_.host).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, PortEdit), std::to_wstring(config_.port).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, UserEdit), wide(config_.username).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, PasswordEdit), wide(config_.password).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, KeyEdit), wide(config_.privateKeyPath).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, LocalEdit), wide(localPath_).c_str());
+        SetWindowTextW(GetDlgItem(settingsWindow_, RemoteEdit), wide(remotePath_.empty() ? "/tmp/" : remotePath_).c_str());
+        settingsLoaded_ = true;
+    }
+    positionSettings();
+    settingsReveal_ = 0.0f;
+    startSettingsAnimation(true);
+    ShowWindow(settingsWindow_, SW_SHOWNORMAL);
     SetForegroundWindow(settingsWindow_);
 }
 
@@ -1243,6 +1478,25 @@ LRESULT CALLBACK App::settingsWindowProc(HWND window, UINT message, WPARAM wPara
 
 LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+    case WM_TIMER:
+        if (wParam == SettingsAnimationTimerId) { tickSettingsAnimation(); return 0; }
+        break;
+    case WM_SHOWWINDOW:
+        if (!wParam) {
+            KillTimer(window, SettingsAnimationTimerId);
+            settingsAnimating_ = false;
+            settingsClosing_ = false;
+            settingsReveal_ = 0.0f;
+            SetWindowRgn(window, nullptr, FALSE);
+        }
+        break;
+    case WM_ACTIVATE:
+        if (LOWORD(wParam) == WA_INACTIVE && IsWindowEnabled(window) &&
+            reinterpret_cast<HWND>(lParam) != window_ &&
+            !isSettingsRelatedWindow(reinterpret_cast<HWND>(lParam))) hideSettings();
+        break;
+    case WM_ENTERSIZEMOVE: finishSettingsAnimation(); return 0;
+    case WM_PRINTCLIENT: paintSettings(reinterpret_cast<HDC>(wParam)); return 0;
     case WM_PAINT:
         paintSettings();
         return 0;
@@ -1256,48 +1510,67 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         }
         break;
     }
-    case WM_CTLCOLOREDIT: {
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wParam);
-        SetBkColor(dc, RGB(255, 255, 255));
-        SetTextColor(dc, RGB(29, 29, 31));
-        return reinterpret_cast<LRESULT>(GetStockObject(WHITE_BRUSH));
+        const auto fill = blendColor(settingsColor(background_), settingsColor(foreground_), 0.035f);
+        SetBkColor(dc, fill);
+        SetTextColor(dc, settingsColor(foreground_));
+        SetDCBrushColor(dc, fill);
+        return reinterpret_cast<LRESULT>(GetStockObject(DC_BRUSH));
     }
     case WM_DPICHANGED: {
-        const UINT dpi = HIWORD(wParam);
+        finishSettingsAnimation();
         const auto* suggested = reinterpret_cast<const RECT*>(lParam);
-        SetWindowPos(window, nullptr, suggested->left, suggested->top,
-            pixels(SettingsWidth, dpi), pixels(SettingsHeight, dpi),
-            SWP_NOZORDER | SWP_NOACTIVATE);
-        rebuildSettingsFonts(dpi);
-        layoutSettings(dpi);
-        InvalidateRect(window, nullptr, FALSE);
+        MONITORINFO monitor{sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST), &monitor);
+        const auto work = monitor.rcWork;
+        settingsLayoutDpi_ = std::max(48, std::min({int(HIWORD(wParam)),
+            MulDiv(int(work.right - work.left) - 24, 96, SettingsWidth),
+            MulDiv(int(work.bottom - work.top) - 24, 96, SettingsHeight)}));
+        const int width = pixels(SettingsWidth, settingsLayoutDpi_), height = pixels(SettingsHeight, settingsLayoutDpi_);
+        SetWindowPos(window, nullptr,
+            std::clamp(int(suggested->left), int(work.left), std::max(int(work.left), int(work.right) - width)),
+            std::clamp(int(suggested->top), int(work.top), std::max(int(work.top), int(work.bottom) - height)),
+            width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+        rebuildSettingsFonts(settingsLayoutDpi_);
+        layoutSettings(settingsLayoutDpi_);
         return 0;
     }
     case WM_NCHITTEST: {
         POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         ScreenToClient(window, &point);
-        const UINT dpi = GetDpiForWindow(window);
+        const UINT dpi = settingsLayoutDpi_;
         const int x = dips(point.x, dpi);
         const int y = dips(point.y, dpi);
         if (y >= 0 && y < SettingsHeaderHeight && x < SettingsWidth - 50) return HTCAPTION;
         return HTCLIENT;
     }
     case WM_LBUTTONUP: {
-        const UINT dpi = GetDpiForWindow(window);
+        const UINT dpi = settingsLayoutDpi_;
         const int x = dips(GET_X_LPARAM(lParam), dpi);
         const int y = dips(GET_Y_LPARAM(lParam), dpi);
         if (y >= 0 && y < SettingsHeaderHeight && x >= SettingsWidth - 50)
-            ShowWindow(window, SW_HIDE);
+            hideSettings();
         return 0;
     }
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE) {
-            ShowWindow(window, SW_HIDE);
+            hideSettings();
             return 0;
         }
         break;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDCANCEL: hideSettings(); return 0;
+        case ConnectionTab: selectSettingsTab(0); return 0;
+        case TransferTab: selectSettingsTab(1); return 0;
+        case AppearanceTab: selectSettingsTab(2); return 0;
+        case EntireFolder:
+        case SelectedFiles:
+            partialTransfer_ = LOWORD(wParam) == SelectedFiles;
+            RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            return 0;
         case NewServer: addServer(); return 0;
         case ReopenServers: reopenServers(); return 0;
         case BackgroundColor: chooseTheme(true); return 0;
@@ -1310,12 +1583,22 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
             DestroyWindow(window_);
             return 0;
         }
+        case OpenLocalFolder: openLocalFolder(); return 0;
+        case CancelTransfer:
+            if (transfer_.active) {
+                stopTransfer();
+                transfer_.active = false; transfer_.failed = true;
+                transfer_.message = "Cancelled; .part retained";
+                InvalidateRect(window_, nullptr, FALSE);
+            }
+            return 0;
         case BrowseLocal: chooseLocalFolder(); return 0;
         case SaveConnect: {
             ConnectionConfig config; std::string local, remote;
             if (readSettings(config, local, remote)) {
                 if (!rememberConnection(config, local, remote)) return 0;
-                startMonitor(config_); ShowWindow(settingsWindow_, SW_HIDE);
+                if (!IsWindowVisible(window_)) showWhenConnected_ = true;
+                startMonitor(config_); hideSettings();
             }
             return 0;
         }
@@ -1323,8 +1606,12 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         case DownloadButton: startTransfer(TransferDirection::Download); return 0;
         }
         break;
-    case WM_CLOSE: ShowWindow(window, SW_HIDE); return 0;
-    case WM_DESTROY: settingsWindow_ = nullptr; return 0;
+    case WM_CLOSE: hideSettings(); return 0;
+    case WM_DESTROY:
+        KillTimer(window, SettingsAnimationTimerId);
+        settingsAnimating_ = false;
+        settingsWindow_ = nullptr;
+        return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
 }
@@ -1366,7 +1653,9 @@ bool App::rememberConnection(const ConnectionConfig& config, const std::string& 
         setHotkeys(oldNext, oldPrevious, false);
         return false;
     }
-    SetWindowTextW(window_, wide(serverName_).c_str());
+    if (old.connection.host != config_.host || old.connection.port != config_.port)
+        detectedHostName_.clear();
+    SetWindowTextW(window_, wide(windowTitle()).c_str());
     InvalidateRect(window_, nullptr, FALSE);
     return true;
 }
@@ -1457,6 +1746,10 @@ void App::stopMonitor() {
 }
 
 void App::startTransfer(TransferDirection direction) {
+    if (transfer_.active) {
+        MessageBoxW(settingsWindow_, L"当前正在传输，请先停止或等待完成。", L"AirSFTP", MB_OK);
+        return;
+    }
     ConnectionConfig config; std::string local, remote;
     if (!readSettings(config, local, remote)) return;
     if (local.empty() || remote.empty()) {
@@ -1469,7 +1762,7 @@ void App::startTransfer(TransferDirection direction) {
         return;
     }
     std::optional<std::vector<std::string>> selection;
-    if (SendDlgItemMessageW(settingsWindow_, SelectedFiles, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    if (partialTransfer_) {
         selection.emplace();
         if (!chooseTransferEntries(settingsWindow_, config, direction,
             direction == TransferDirection::Upload ? local : remote, *selection)) return;
@@ -1478,7 +1771,10 @@ void App::startTransfer(TransferDirection direction) {
     startMonitor(config_);
     stopTransfer();
     const auto generation = transferGeneration_;
-    ShowWindow(settingsWindow_, SW_HIDE);
+    transferLocalFolder_ = local;
+    transfer_ = {}; transfer_.active = true; transfer_.direction = direction;
+    transfer_.message = "Scanning / connecting";
+    hideSettings();
     transferThread_ = std::jthread([this, config, local, remote, direction, generation, selection,
         previous = std::move(transferThread_)](std::stop_token token) mutable {
         // Prevent two successive transfers from writing the same destination concurrently.
@@ -1496,7 +1792,12 @@ void App::startTransfer(TransferDirection direction) {
             return;
         }
         session.transferFolder(direction, local, remote, selection,
-            [this, generation](const TransferProgress& value) { postTransfer(value, generation); }, error);
+            [this, generation](const TransferProgress& value) { postTransfer(value, generation); }, error,
+            [this, generation, token, direction, local, remote](std::size_t count, std::uint64_t bytes) {
+                return confirmTransfer(count, bytes, direction,
+                    direction == TransferDirection::Upload ? local : remote,
+                    direction == TransferDirection::Upload ? remote : local, generation, token);
+            });
     });
 }
 
