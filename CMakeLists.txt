@@ -29,9 +29,11 @@ add_library(airsftp_core STATIC
   src/transfer_engine.cpp
   src/folder_transfer.cpp
   src/telemetry.cpp
+  src/local_telemetry.cpp
+  src/restart_process.cpp
 )
 target_include_directories(airsftp_core PUBLIC src)
-target_link_libraries(airsftp_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt)
+target_link_libraries(airsftp_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt iphlpapi psapi wbemuuid ole32 oleaut32 advapi32 pdh)
 target_compile_definitions(airsftp_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 add_executable(AirSFTP WIN32
@@ -60,6 +62,14 @@ target_link_libraries(ssh_client_test PRIVATE airsftp_core)
 
 enable_testing()
 add_test(NAME telemetry_parser COMMAND telemetry_parser_test)
+add_executable(local_telemetry_test tests/local_telemetry_test.cpp)
+target_link_libraries(local_telemetry_test PRIVATE airsftp_core)
+add_test(NAME local_telemetry COMMAND local_telemetry_test)
+set_tests_properties(local_telemetry PROPERTIES TIMEOUT 30)
+add_executable(restart_process_test tests/restart_process_test.cpp)
+target_link_libraries(restart_process_test PRIVATE airsftp_core)
+add_test(NAME restart_process COMMAND restart_process_test)
+set_tests_properties(restart_process PROPERTIES TIMEOUT 15)
 add_test(NAME credential_store COMMAND credential_store_test)
 add_test(NAME ssh_client COMMAND ssh_client_test)
 set_tests_properties(ssh_client PROPERTIES TIMEOUT 10)

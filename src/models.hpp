@@ -31,6 +31,12 @@ struct TelemetrySnapshot {
     std::string cpuPowerStrategy;
     double packageTemperature = -1.0;
     double packagePowerWatts = -1.0;
+    double cpuUsagePercent = -1.0;
+    double cpuClockMHz = -1.0;
+    std::uint32_t cpuPhysicalCores = 0, cpuLogicalProcessors = 0;
+    // Windows firmware thermal zones are separate from CPU die/package sensors.
+    double thermalZoneTemperature = -1.0;
+    std::vector<SensorValue> chipletTemperatures;
     // Hottest NVMe composite temperature; negative means unavailable.
     double ssdTemperature = -1.0;
     // Configured DDR transfer rate, not a live oscillator frequency.
@@ -40,6 +46,9 @@ struct TelemetrySnapshot {
     std::vector<GpuMetrics> gpus;
     std::uint64_t memoryUsed = 0;
     std::uint64_t memoryTotal = 0;
+    bool swapAvailable = false;
+    std::uint64_t swapUsed = 0;
+    std::uint64_t swapTotal = 0;
     std::uint64_t diskUsed = 0;
     std::uint64_t diskTotal = 0;
     std::uint64_t networkDown = 0;
@@ -60,9 +69,11 @@ struct ConnectionConfig {
 };
 
 struct ServerProfile {
+    bool local = false;
     ConnectionConfig connection;
     std::string name, localFolder, remoteFolder = "/tmp/";
     std::uint32_t background = 0xFFFFFF, foreground = 0x1D1D1F;
+    std::uint32_t refreshIntervalSeconds = 2;
 };
 
 struct ServerSettings {

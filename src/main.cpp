@@ -1,10 +1,18 @@
 #include "app.hpp"
+#include "restart_process.hpp"
 
 #include <libssh2.h>
 #include <winsock2.h>
 #include <windows.h>
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    int argc = 0;
+    auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 2 && std::wstring_view(argv[1]) == L"--restart-wait-handle") {
+        const bool ready = argc == 3 && restart_process::waitForParent(argv[2]);
+        LocalFree(argv);
+        if (!ready) return 1;
+    } else if (argv) LocalFree(argv);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 

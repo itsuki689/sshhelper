@@ -77,6 +77,8 @@ ls -ld /sys/module/coretemp 2>&1 || true
     if (!snapshot.gpus.empty())
         std::cout << "GPU memory clock: " << snapshot.gpus[0].memoryClockMHz << " MHz; VRAM used: "
                   << snapshot.gpus[0].memoryUsed << "/" << snapshot.gpus[0].memoryTotal << " bytes" << std::endl;
+    std::cout << "SWAP available: " << snapshot.swapAvailable << "; used/total: "
+              << snapshot.swapUsed << "/" << snapshot.swapTotal << " bytes" << std::endl;
     require(snapshot.packageTemperature >= 0, "CPU temperature unavailable");
     return 0;
 }

@@ -165,7 +165,13 @@ if command -v sensors >/dev/null 2>&1; then
 fi
 
 awk '/MemTotal:/ { total=$2*1024 } /MemAvailable:/ { available=$2*1024 }
-     END { printf "MEM|%.0f|%.0f\n", total-available, total }' /proc/meminfo 2>/dev/null
+     /^SwapTotal:/ { swap_total=$2*1024; has_total=1 }
+     /^SwapFree:/ { swap_free=$2*1024; has_free=1 }
+     END {
+       printf "MEM|%.0f|%.0f\n", total-available, total
+       if (has_total && has_free && swap_total >= 0 && swap_free >= 0 && swap_free <= swap_total)
+         printf "SWAP|%.0f|%.0f\n", swap_total-swap_free, swap_total
+     }' /proc/meminfo 2>/dev/null
 
 # Root publishes only the configured memory rate at boot; no sudo or DMI
 # enumeration is needed in the polling loop.
@@ -319,6 +325,17 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
         } else if (parts[0] == "MEM" && parts.size() >= 3) {
             snapshot.memoryUsed = u64(parts[1]);
             snapshot.memoryTotal = u64(parts[2]);
+        } else if (parts[0] == "SWAP" && parts.size() == 3) {
+            auto counter = [](const std::string& text, std::uint64_t& value) {
+                const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+                return ec == std::errc{} && end == text.data() + text.size();
+            };
+            std::uint64_t used = 0, total = 0;
+            if (counter(parts[1], used) && counter(parts[2], total) && used <= total) {
+                snapshot.swapAvailable = true;
+                snapshot.swapUsed = used;
+                snapshot.swapTotal = total;
+            }
         } else if (parts[0] == "MEMCLOCK" && parts.size() == 2) {
             std::uint64_t rate = 0;
             const auto [end, ec] = std::from_chars(parts[1].data(), parts[1].data() + parts[1].size(), rate);

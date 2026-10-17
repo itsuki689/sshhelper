@@ -195,6 +195,14 @@ int main() {
         CHECK(parser.parse("GPU|0, NVIDIA, 40, 27, " + std::string(value) + ", 22528, 100, 6800\n", 1).gpus[0].memoryTotal == 0);
     CHECK(parser.parse("GPU|0, NVIDIA, 40, 27, 0, 22528, 100, 6800\n", 1).gpus[0].memoryTotal == 22528ULL * 1024 * 1024);
 
+    const auto swapping = parser.parse("SWAP|1073741824|4294967296\n", 1);
+    CHECK(swapping.swapAvailable && swapping.swapUsed == 1073741824ULL && swapping.swapTotal == 4294967296ULL);
+    const auto noSwap = parser.parse("SWAP|0|0\n", 1);
+    CHECK(noSwap.swapAvailable && noSwap.swapUsed == 0 && noSwap.swapTotal == 0);
+    CHECK(!parser.parse("END|1\n", 1).swapAvailable);
+    for (const auto* record : {"SWAP|-1|10\n", "SWAP|11|10\n", "SWAP|bad|10\n", "SWAP|1|bad\n", "SWAP|1|10oops\n", "SWAP|0|18446744073709551616\n"})
+        CHECK(!parser.parse(record, 1).swapAvailable);
+
     TelemetryParser legacyParser;
     const auto legacy = legacyParser.parse(
         "AIR|2\nGPU|0, NVIDIA RTX 3080, 55, 30, 1024, 10240\nEND|1\n", 6.0);

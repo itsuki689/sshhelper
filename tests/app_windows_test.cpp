@@ -62,7 +62,72 @@ struct AppWindowTest {
         CHECK(first.settingsWindow_ != second->settingsWindow_);
         first.collapseMode_ = App::CollapseMode::Expanded;
         ShowWindow(first.window_, SW_SHOWNOACTIVATE);
+        // Name clicks fold; releasing outside/capture loss cancels without affecting transfers.
+        const auto dpi = GetDpiForWindow(first.window_);
+        const LPARAM namePoint = MAKELPARAM(MulDiv(60, dpi, 96), MulDiv(27, dpi, 96));
+        POINT screen{MulDiv(60, dpi, 96), MulDiv(27, dpi, 96)};
+        ClientToScreen(first.window_, &screen);
+        CHECK(SendMessageW(first.window_, WM_NCHITTEST, 0, MAKELPARAM(screen.x, screen.y)) == HTCLIENT);
+        const auto monitorGeneration = first.monitorGeneration_;
+        first.transfer_.active = true;
+        MONITORINFO clickMonitor{sizeof(clickMonitor)};
+        CHECK(GetMonitorInfoW(MonitorFromWindow(first.window_, MONITOR_DEFAULTTONEAREST), &clickMonitor));
+        RECT expanded{}; GetWindowRect(first.window_, &expanded);
+        // Even near the top edge, a name click chooses the nearest left/right side.
+        for (const bool left : {true, false}) {
+            const int inset = MulDiv(40, dpi, 96);
+            const int x = left ? clickMonitor.rcWork.left + inset :
+                clickMonitor.rcWork.right - (expanded.right - expanded.left) - inset;
+            SetWindowPos(first.window_, nullptr, x, clickMonitor.rcWork.top + MulDiv(8, dpi, 96),
+                0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            SendMessageW(first.window_, WM_LBUTTONDOWN, MK_LBUTTON, namePoint);
+            CHECK(first.compactPointerDown_ && first.titlePointerDown_);
+            SendMessageW(first.window_, WM_LBUTTONUP, 0, namePoint);
+            first.finishWindowAnimation();
+            CHECK(first.collapseMode_ == App::CollapseMode::Side);
+            RECT compact{}; GetWindowRect(first.window_, &compact);
+            CHECK(left ? compact.left == clickMonitor.rcWork.left : compact.right == clickMonitor.rcWork.right);
+            CHECK(compact.right - compact.left == MulDiv(36, dpi, 96));
+            CHECK(compact.bottom - compact.top == MulDiv(78, dpi, 96));
+            CHECK(compact.top >= clickMonitor.rcWork.top && compact.bottom <= clickMonitor.rcWork.bottom);
+            CHECK(first.transfer_.active && first.monitorGeneration_ == monitorGeneration);
+            CHECK(second->collapseMode_ == App::CollapseMode::Expanded);
+            SendMessageW(first.window_, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(5, 5));
+            SendMessageW(first.window_, WM_LBUTTONUP, 0, MAKELPARAM(5, 5));
+            first.finishWindowAnimation(); CHECK(!first.isCollapsed());
+        }
+        SendMessageW(first.window_, WM_LBUTTONDOWN, MK_LBUTTON, namePoint);
+        SendMessageW(first.window_, WM_LBUTTONUP, 0, MAKELPARAM(MulDiv(200, dpi, 96), MulDiv(90, dpi, 96)));
+        CHECK(!first.isCollapsed() && !first.animating_);
+        SendMessageW(first.window_, WM_LBUTTONDOWN, MK_LBUTTON, namePoint);
+        ReleaseCapture(); CHECK(!first.compactPointerDown_ && !first.titlePointerDown_);
+        first.transfer_.active = false;
         first.showSettings();
+        std::uint32_t interval = 0;
+        CHECK(first.readRefreshInterval(interval) && interval == 2);
+        for (const auto* invalid : {L"", L"0", L"3601", L"-2", L"1.5", L"2abc"}) {
+            SetDlgItemTextW(first.settingsWindow_, App::RefreshIntervalEdit, invalid);
+            CHECK(!first.readRefreshInterval(interval));
+        }
+        SetDlgItemTextW(first.settingsWindow_, App::RefreshIntervalEdit, L"3600");
+        CHECK(first.readRefreshInterval(interval) && interval == 3600);
+        SetDlgItemTextW(first.settingsWindow_, App::RefreshIntervalEdit, L"7");
+        CHECK(first.readRefreshInterval(interval) && interval == 7);
+        first.refreshIntervalSeconds_ = 3600;
+        const auto waitStarted = std::chrono::steady_clock::now();
+        std::jthread waiter([&](std::stop_token token) { first.waitRefreshInterval(token); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        first.refreshIntervalSeconds_ = 1; // A shorter setting updates an existing wait.
+        waiter.join();
+        const auto elapsed = std::chrono::steady_clock::now() - waitStarted;
+        CHECK(elapsed >= std::chrono::milliseconds(900) && elapsed < std::chrono::seconds(3));
+        first.refreshIntervalSeconds_ = 3600;
+        const auto cancelStarted = std::chrono::steady_clock::now();
+        std::jthread cancelledWait([&](std::stop_token token) { first.waitRefreshInterval(token); });
+        cancelledWait.request_stop(); cancelledWait.join();
+        CHECK(std::chrono::steady_clock::now() - cancelStarted < std::chrono::seconds(1));
+        first.refreshIntervalSeconds_ = 2;
+
         CHECK(IsWindowVisible(first.settingsWindow_));
         RECT panel{}, workArea{};
         GetWindowRect(first.settingsWindow_, &panel);
@@ -88,6 +153,7 @@ struct AppWindowTest {
         wchar_t draft[64]{};
         GetDlgItemTextW(first.settingsWindow_, App::HostEdit, draft, 64);
         CHECK(std::wstring(draft) == L"draft.example");
+        CHECK(first.readRefreshInterval(interval) && interval == 7);
         HDC colorDc = CreateCompatibleDC(nullptr);
         SendMessageW(first.settingsWindow_, WM_CTLCOLOREDIT, reinterpret_cast<WPARAM>(colorDc), 0);
         CHECK(GetTextColor(colorDc) == RGB(0xEE, 0xDD, 0xCC));
@@ -251,9 +317,57 @@ struct AppWindowTest {
         DestroyWindow(tray.window_);
         CHECK(IsWindow(tray.trayWindow_));
         CHECK(!PeekMessageW(&message, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE));
+        // The built-in host is a singleton peer with the same theme, settings and tray behavior.
+        auto local = std::make_unique<App>(GetModuleHandleW(nullptr));
+        local->root_ = &tray;
+        ServerProfile localProfile; localProfile.local = true; localProfile.background = 0x123456;
+        localProfile.refreshIntervalSeconds = 7;
+        local->applyProfile(localProfile);
+        CHECK(local->local_ && local->config_.host.empty() && local->profile().local);
+        CHECK(local->refreshIntervalSeconds_ == 7);
+        CHECK(local->createMainWindow(SW_HIDE));
+        CHECK(!(GetWindowLongPtrW(local->window_, GWL_EXSTYLE) & WS_EX_ACCEPTFILES));
+        local->startMonitor({});
+        const auto sampleDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!local->snapshot_.connected && std::chrono::steady_clock::now() < sampleDeadline) {
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&message); DispatchMessageW(&message);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(local->snapshot_.connected && local->snapshot_.status == "Local");
+        CHECK(!local->detectedHostName_.empty());
+        local->stopMonitor(); local->monitorThread_.join();
+        local->showSettings(); local->finishSettingsAnimation();
+        CHECK(!IsWindowVisible(GetDlgItem(local->settingsWindow_, App::HostEdit)));
+        CHECK(!IsWindowEnabled(GetDlgItem(local->settingsWindow_, App::TransferTab)));
+        CHECK(!IsWindowVisible(GetDlgItem(local->settingsWindow_, App::DeleteServer)));
+        ConnectionConfig noSsh; std::string localFolder, remoteFolder;
+        CHECK(local->readSettings(noSsh, localFolder, remoteFolder));
+        CHECK(noSsh.host.empty() && noSsh.username.empty());
+        local->selectSettingsTab(2);
+        CHECK(IsWindowVisible(GetDlgItem(local->settingsWindow_, App::RefreshIntervalEdit)));
+        local->selectSettingsTab(1); CHECK(local->settingsTab_ == 0);
+        local->startTransfer(TransferDirection::Upload);
+        local->uploadDropped({"C:/unused.txt"}); CHECK(!local->transfer_.active);
+        local->detectedHostName_ = "desktop";
+        CHECK(local->windowTitle().find("desktop") != std::string::npos);
+        auto* localPeer = local.get();
+        tray.children_.push_back(std::move(local));
+        const auto peers = tray.servers().size();
+        tray.showLocalMonitor(); tray.showLocalMonitor();
+        CHECK(tray.servers().size() == peers && IsWindowVisible(localPeer->window_));
+        localPeer->hideToTray(); CHECK(!IsWindowVisible(localPeer->window_));
+        post(*localPeer, true, localPeer->monitorGeneration_);
+        tray.showConnectedServers(); CHECK(IsWindowVisible(localPeer->window_));
         tray.quitApplication();
         CHECK(!tray.trayWindow_ && !nextServer->window_);
-        CHECK(PeekMessageW(&message, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE));
+        bool localQuit = false;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) { localQuit = true; break; }
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+        CHECK(localQuit);
         return 0;
     }
 };

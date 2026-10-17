@@ -1,12 +1,13 @@
 #include "app.hpp"
 #include "resource.h"
+#include "restart_process.hpp"
 #include <algorithm>
 
 namespace {
 constexpr wchar_t TrayClass[] = L"AirSFTPTrayWindow";
 constexpr UINT TrayMessage = WM_APP + 10;
 constexpr UINT_PTR RetryTrayTimer = 1;
-constexpr UINT ShowConnected = 100, HideAll = 101, AddServer = 102, ExitApp = 103, ServerBase = 1000;
+constexpr UINT ShowConnected = 100, HideAll = 101, AddServer = 102, ExitApp = 103, LocalHost = 104, RestartApp = 105, ServerBase = 1000;
 const UINT TaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 std::wstring wide(const std::string& value) {
     const int count = MultiByteToWideChar(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0);
@@ -139,6 +140,7 @@ void App::showTrayMenu() {
         if (serverMenu) DestroyMenu(serverMenu);
         return;
     }
+    AppendMenuW(menu, MF_STRING, LocalHost, L"本机监控");
     AppendMenuW(menu, MF_STRING, ShowConnected, L"显示已连接服务器");
     AppendMenuW(menu, MF_STRING, HideAll, L"隐藏全部窗口");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -155,6 +157,7 @@ void App::showTrayMenu() {
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(serverMenu), L"服务器设置");
     AppendMenuW(menu, MF_STRING, AddServer, L"新增服务器");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, RestartApp, L"重启软件");
     AppendMenuW(menu, MF_STRING, ExitApp, L"退出");
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -164,9 +167,11 @@ void App::showTrayMenu() {
     PostMessageW(trayWindow_, WM_NULL, 0, 0);
     DestroyMenu(menu);
     if (exiting_) return;
-    if (command == ShowConnected) showConnectedServers();
+    if (command == LocalHost) showLocalMonitor();
+    else if (command == ShowConnected) showConnectedServers();
     else if (command == HideAll) for (auto* server : servers()) server->hideToTray();
     else if (command == AddServer) addServer();
+    else if (command == RestartApp) restartApplication();
     else if (command == ExitApp) quitApplication();
     else if (command >= ServerBase && command - ServerBase < all.size()) {
         auto* server = all[command - ServerBase];
@@ -174,6 +179,30 @@ void App::showTrayMenu() {
         if (!server->window_ && !server->createMainWindow(SW_HIDE)) return;
         server->showSettings();
     }
+}
+
+void App::restartApplication() {
+    if (root_ != this) { root_->restartApplication(); return; }
+    if (exiting_) return;
+    const auto all = servers();
+    if (std::any_of(all.begin(), all.end(), [](App* app) { return app->transfer_.active; }) &&
+        MessageBoxW(trayWindow_ ? trayWindow_ : window_,
+            L"当前有文件正在传输。重启将安全停止传输，未完成内容保留为临时文件。\n\n是否继续重启软件？",
+            L"AirSFTP 重启", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    auto executable = restart_process::executablePath();
+    // Publishing a new build may have renamed the still-running old executable.
+    if (executable.filename().wstring().starts_with(L"AirSFTP.previous-")) {
+        const auto current = executable.parent_path() / L"AirSFTP.exe";
+        std::error_code error;
+        if (std::filesystem::is_regular_file(current, error)) executable = current;
+    }
+    std::wstring error;
+    if (!restart_process::launchAfterExit(executable, error)) {
+        MessageBoxW(trayWindow_ ? trayWindow_ : window_, (error + L"\n当前程序继续运行。").c_str(),
+            L"AirSFTP 重启失败", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    quitApplication();
 }
 
 void App::quitApplication() {

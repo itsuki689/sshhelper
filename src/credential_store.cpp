@@ -170,15 +170,19 @@ bool saveServerSettings(const std::filesystem::path& path,
                                const ServerSettings& settings, std::string& error) {
     error.clear();
     std::vector<unsigned char> plain;
-    if (settings.servers.size() > 64) { error = "Maximum 64 servers"; return false; }
-    appendU32(plain, 2);
+    const auto localCount = std::count_if(settings.servers.begin(), settings.servers.end(), [](const auto& p) { return p.local; });
+    if (settings.servers.size() > 65 || localCount > 1 || settings.servers.size() - localCount > 64) {
+        error = "Maximum 64 SSH servers and one local host"; return false;
+    }
+    appendU32(plain, 4);
     appendU32(plain, settings.nextHotkey);
     appendU32(plain, settings.previousHotkey);
     appendU32(plain, static_cast<std::uint32_t>(settings.servers.size()));
     for (const auto& profile : settings.servers) {
         const auto& config = profile.connection;
         if (config.port < 1 || config.port > 65535 || profile.background > 0xFFFFFF ||
-            profile.foreground > 0xFFFFFF) { clearBytes(plain); error = "Invalid server settings"; return false; }
+            profile.foreground > 0xFFFFFF || profile.refreshIntervalSeconds < 1 ||
+            profile.refreshIntervalSeconds > 3600) { clearBytes(plain); error = "Invalid server settings"; return false; }
         appendU32(plain, config.port);
         for (const auto* value : {&config.host, &config.username, &config.password,
              &config.privateKeyPath, &config.keyPassphrase, &profile.name, &profile.localFolder, &profile.remoteFolder}) {
@@ -187,6 +191,8 @@ bool saveServerSettings(const std::filesystem::path& path,
         }
         appendU32(plain, profile.background);
         appendU32(plain, profile.foreground);
+        appendU32(plain, profile.refreshIntervalSeconds);
+        appendU32(plain, profile.local ? 1 : 0);
     }
     if (plain.size() > MaxCredentialFileSize - 4096) {
         clearBytes(plain); error = "Server settings exceed size limit"; return false;
@@ -276,10 +282,10 @@ bool loadServerSettings(const std::filesystem::path& path,
         settings = std::move(loaded);
         return true;
     }
-    valid = valid && version == 2 &&
+    valid = valid && (version == 2 || version == 3 || version == 4) &&
         readU32(output.pbData, output.cbData, offset, loaded.nextHotkey) &&
         readU32(output.pbData, output.cbData, offset, loaded.previousHotkey) &&
-        readU32(output.pbData, output.cbData, offset, count) && count <= 64;
+        readU32(output.pbData, output.cbData, offset, count) && count <= 65;
     for (std::uint32_t i = 0; valid && i < count; ++i) {
         ServerProfile profile;
         auto& config = profile.connection;
@@ -292,9 +298,18 @@ bool loadServerSettings(const std::filesystem::path& path,
         valid = valid && readU32(output.pbData, output.cbData, offset, profile.background) &&
             readU32(output.pbData, output.cbData, offset, profile.foreground) &&
             profile.background <= 0xFFFFFF && profile.foreground <= 0xFFFFFF;
+        if (valid && version >= 3)
+            valid = readU32(output.pbData, output.cbData, offset, profile.refreshIntervalSeconds) &&
+                profile.refreshIntervalSeconds >= 1 && profile.refreshIntervalSeconds <= 3600;
+        if (valid && version >= 4) {
+            std::uint32_t local = 0;
+            valid = readU32(output.pbData, output.cbData, offset, local) && local <= 1;
+            profile.local = local != 0;
+        }
         if (valid) loaded.servers.push_back(std::move(profile));
     }
-    valid = valid && offset == output.cbData;
+    const auto locals = std::count_if(loaded.servers.begin(), loaded.servers.end(), [](const auto& p) { return p.local; });
+    valid = valid && locals <= 1 && loaded.servers.size() - locals <= 64 && offset == output.cbData;
     if (valid) settings = std::move(loaded);
     else error = "Saved server settings are invalid";
     SecureZeroMemory(output.pbData, output.cbData);

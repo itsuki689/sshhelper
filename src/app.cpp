@@ -4,6 +4,7 @@
 #include "resource.h"
 #include "ssh_client.hpp"
 #include "telemetry.hpp"
+#include "local_telemetry.hpp"
 #include "transfer_picker.hpp"
 #include <shobjidl.h>
 
@@ -14,6 +15,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <climits>
@@ -31,6 +33,13 @@ constexpr UINT TransferMessage = WM_APP + 2;
 constexpr UINT ConfirmTransferMessage = WM_APP + 3;
 constexpr int MainWidth = 380;
 constexpr int MainHeight = 300;
+constexpr float HeaderCenterY = 27.0f;
+constexpr float HeaderStatusX = 150.0f;
+// Every host uses the same header center, including fitted long hostnames.
+D2D1_RECT_F headerTextRect(float left, float right) {
+    return D2D1::RectF(left, HeaderCenterY - 14, right, HeaderCenterY + 14);
+}
+bool titleHit(int x, int y) { return x >= 18 && x <= 140 && y >= 13 && y <= 42; }
 constexpr int CompactWidth = 100;
 constexpr int CompactHeight = 32;
 constexpr int SideWidth = 36;
@@ -119,7 +128,7 @@ std::wstring powerLabel(const wchar_t* device, const wchar_t* fallback, double w
 std::wstring storageText(std::uint64_t bytes) {
     constexpr double BytesPerGigabyte = 1'000'000'000.0;
     wchar_t buffer[64]{};
-    swprintf(buffer, 64, L"%.3f GB", static_cast<double>(bytes) / BytesPerGigabyte);
+    swprintf(buffer, 64, L"%.1f GB", static_cast<double>(bytes) / BytesPerGigabyte);
     return buffer;
 }
 
@@ -156,6 +165,39 @@ void drawText(ID2D1HwndRenderTarget* target, IDWriteTextFormat* format, ID2D1Bru
               const std::wstring& text, const D2D1_RECT_F& rect) {
     target->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format, rect, brush,
                       D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+}
+
+void drawFittedText(ID2D1HwndRenderTarget* target, IDWriteFactory* factory,
+                    IDWriteTextFormat* format, ID2D1Brush* brush,
+                    const std::wstring& text, const D2D1_RECT_F& rect) {
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format,
+            rect.right - rect.left, rect.bottom - rect.top, &layout))) return;
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TEXT_METRICS metrics{};
+    if (SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.width > rect.right - rect.left)
+        layout->SetFontSize(format->GetFontSize() * (rect.right - rect.left) / metrics.width,
+            DWRITE_TEXT_RANGE{0, static_cast<UINT32>(text.size())});
+    target->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    release(layout);
+}
+
+void drawParameterRow(ID2D1HwndRenderTarget* target, IDWriteFactory* factory,
+                      IDWriteTextFormat* labelFormat, IDWriteTextFormat* valueFormat,
+                      ID2D1Brush* brush, float top, float bottom,
+                      const std::array<std::wstring, 4>& values,
+                      const std::array<ID2D1Brush*, 4>& brushes = {}) {
+    // Each parameter row shares the label and three left-aligned value columns.
+    constexpr float left[] = {18, 96, 182, 268};
+    constexpr float right[] = {84, 174, 260, 354};
+    for (std::size_t column = 0; column < values.size(); ++column) {
+        auto* format = column ? valueFormat : labelFormat;
+        const auto alignment = format->GetTextAlignment();
+        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        drawFittedText(target, factory, format, brushes[column] ? brushes[column] : brush, values[column],
+            D2D1::RectF(left[column], top, right[column], bottom));
+        format->SetTextAlignment(alignment);
+    }
 }
 
 void drawGearIcon(ID2D1HwndRenderTarget* target, ID2D1Factory* factory,
@@ -201,6 +243,12 @@ App::App(HINSTANCE instance) : instance_(instance) {
         if (labelFormat_) labelFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"zh-cn", &compactFormat_);
+        writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"zh-cn", &capacityFormat_);
+        if (capacityFormat_) {
+            capacityFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            capacityFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
         if (compactFormat_) {
             compactFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             compactFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -215,7 +263,7 @@ App::~App() {
     if (transferThread_.joinable()) transferThread_.join();
     if (monitorThread_.joinable()) monitorThread_.join();
     discardGraphics();
-    release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_);
+    release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_); release(capacityFormat_);
     release(writeFactory_); release(d2dFactory_);
     if (uiFont_) DeleteObject(uiFont_);
     if (settingsTitleFont_) DeleteObject(settingsTitleFont_);
@@ -227,10 +275,14 @@ int App::run(int showCommand) {
     ServerSettings saved;
     std::string error;
     loadServerSettings(defaultCredentialPath(), saved, error);
+    if (std::none_of(saved.servers.begin(), saved.servers.end(), [](const auto& p) { return p.local; })) {
+        ServerProfile local; local.local = true; local.name = "本机";
+        saved.servers.push_back(std::move(local));
+    }
     if (!saved.servers.empty()) applyProfile(saved.servers.front());
     if (!registerClasses() || !createMainWindow(SW_HIDE)) return 1;
     const bool trayReady = createTray();
-    showWhenConnected_ = !config_.host.empty();
+    showWhenConnected_ = local_ || !config_.host.empty();
     if (!error.empty()) { snapshot_.status = error; InvalidateRect(window_, nullptr, FALSE); }
     for (std::size_t i = 1; i < saved.servers.size(); ++i) {
         auto child = std::make_unique<App>(instance_);
@@ -245,8 +297,8 @@ int App::run(int showCommand) {
     previousHotkey_ = saved.previousHotkey;
     setHotkeys(saved.nextHotkey, saved.previousHotkey, true);
     for (auto* server : servers())
-        if (server->window_ && !server->config_.host.empty()) server->startMonitor(server->config_);
-    if (config_.host.empty()) showSettings();
+        if (server->window_ && (server->local_ || !server->config_.host.empty())) server->startMonitor(server->config_);
+    if (!local_ && config_.host.empty()) showSettings();
     if (!trayReady) {
         // Keep settings reachable if Explorer cannot create a tray icon.
         for (auto* server : servers()) if (server->window_) ShowWindow(server->window_, showCommand);
@@ -306,6 +358,7 @@ bool App::createMainWindow(int showCommand) {
     animating_ = false;
     hasExpandedRect_ = false;
     compactPointerDown_ = false;
+    titlePointerDown_ = false;
     compactDragging_ = false;
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -326,7 +379,7 @@ bool App::createMainWindow(int showCommand) {
         std::lock_guard lock(messageMutex_);
         messageWindow_ = window_;
     }
-    DragAcceptFiles(window_, TRUE);
+    DragAcceptFiles(window_, local_ ? FALSE : TRUE);
     constexpr DWORD roundPreference = 2;
     constexpr auto cornerAttribute = static_cast<DWMWINDOWATTRIBUTE>(33);
     DwmSetWindowAttribute(window_, cornerAttribute, &roundPreference, sizeof(roundPreference));
@@ -384,6 +437,16 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
+        {
+            POINT cursor{};
+            if (GetCursorPos(&cursor) && ScreenToClient(window, &cursor)) {
+                const UINT dpi = GetDpiForWindow(window);
+                if (titleHit(dips(cursor.x, dpi), dips(cursor.y, dpi))) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+        }
         break;
     case WM_NCHITTEST: {
         if (animating_ || isCollapsed()) return HTCLIENT;
@@ -392,6 +455,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
             POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(window, &point);
             const UINT dpi = GetDpiForWindow(window);
+            if (titleHit(dips(point.x, dpi), dips(point.y, dpi))) return HTCLIENT;
             if (dips(point.y, dpi) < 48 && dips(point.x, dpi) < MainWidth - 120) return HTCAPTION;
         }
         return result;
@@ -405,10 +469,11 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         const bool gear = !isCollapsed() && y < 48 && x > MainWidth - 112 && x <= MainWidth - 38;
         if (!gear) hideSettings();
         if (animating_) return 0;
-        if (isCollapsed()) {
+        if (isCollapsed() || titleHit(x, y)) {
             GetCursorPos(&compactPressCursor_);
             GetWindowRect(window_, &compactPressRect_);
             compactPointerDown_ = true;
+            titlePointerDown_ = !isCollapsed();
             compactDragging_ = false;
             SetCapture(window_);
             return 0;
@@ -451,6 +516,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         if (compactPointerDown_) {
             compactPointerDown_ = false;
             compactDragging_ = false;
+            titlePointerDown_ = false;
         }
         break;
     case WM_LBUTTONDBLCLK:
@@ -463,10 +529,21 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         if (animating_) return 0;
         if (compactPointerDown_) {
             const bool dragged = compactDragging_;
+            const bool title = titlePointerDown_;
             compactPointerDown_ = false;
             compactDragging_ = false;
+            titlePointerDown_ = false;
             if (GetCapture() == window_) ReleaseCapture();
-            if (dragged) snapCompactAfterDrag();
+            if (title) {
+                if (dragged) {
+                    GetWindowRect(window_, &expandedRect_);
+                    hasExpandedRect_ = true;
+                    handleEdgeDock();
+                } else {
+                    const UINT dpi = GetDpiForWindow(window);
+                    if (titleHit(dips(GET_X_LPARAM(lParam), dpi), dips(GET_Y_LPARAM(lParam), dpi))) collapseNearestSide();
+                }
+            } else if (dragged) snapCompactAfterDrag();
             else restoreExpanded();
             return 0;
         }
@@ -538,7 +615,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
         KillTimer(window_, AnimationTimerId);
         window_ = nullptr;
         discardGraphics();
-        if (config_.host.empty()) deleted_ = true;
+        if (!local_ && config_.host.empty()) deleted_ = true;
         const auto open = servers();
         if (!root_->trayWindow_ && std::none_of(open.begin(), open.end(), [](App* app) { return app->window_ != nullptr; }))
             PostQuitMessage(0);
@@ -634,23 +711,24 @@ void App::paint() {
     ID2D1SolidColorBrush* statusBrush = nullptr;
     renderTarget_->CreateSolidColorBrush(statusColor, &statusBrush);
     if (statusBrush) statusBrush->SetOpacity(contentOpacity);
-    const std::wstring latency = snapshot_.connected ? numberText(snapshot_.sshLatencyMs) : L"—";
+    const std::wstring latency = local_ ? L"本机" : (snapshot_.connected ? numberText(snapshot_.sshLatencyMs) : L"—");
     IDWriteTextFormat* compact = compactFormat_ ? compactFormat_ : labelFormat_;
 
     if (side) {
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(18, 15), 4, 4), statusBrush);
         drawText(renderTarget_, compact, textBrush_, latency, D2D1::RectF(2, 30, 34, 53));
-        drawText(renderTarget_, compact, mutedBrush_, L"ms", D2D1::RectF(2, 50, 34, 72));
+        drawText(renderTarget_, compact, mutedBrush_, local_ ? L"" : L"ms", D2D1::RectF(2, 50, 34, 72));
     } else if (horizontal) {
         renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(14, 16), 4, 4), statusBrush);
-        drawText(renderTarget_, compact, mutedBrush_, latency + L" ms", D2D1::RectF(24, 1, 96, 31));
+        drawText(renderTarget_, compact, mutedBrush_, latency + (local_ ? L"" : L" ms"), D2D1::RectF(24, 1, 96, 31));
     } else {
-        drawText(renderTarget_, titleFormat_, textBrush_, wide(windowTitle()), D2D1::RectF(18, 13, 140, 42));
-        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(150, 27), 4, 4), statusBrush);
-        drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), D2D1::RectF(160, 14, 236, 40));
-        drawText(renderTarget_, compact, mutedBrush_, snapshot_.connected ? latency + L" ms" : L"—",
-            D2D1::RectF(238, 14, 300, 40));
-        drawGearIcon(renderTarget_, d2dFactory_, mutedBrush_, surfaceBrush_, D2D1::Point2F(314, 27));
+        const auto title = local_ && !detectedHostName_.empty() ? detectedHostName_ : windowTitle();
+        drawFittedText(renderTarget_, writeFactory_, titleFormat_, textBrush_, wide(title), headerTextRect(18, 140));
+        renderTarget_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(HeaderStatusX, HeaderCenterY), 4, 4), statusBrush);
+        drawText(renderTarget_, labelFormat_, mutedBrush_, wide(snapshot_.status), headerTextRect(160, 236));
+        drawText(renderTarget_, compact, mutedBrush_, local_ ? L"本机" : (snapshot_.connected ? latency + L" ms" : L"—"),
+            headerTextRect(238, 300));
+        drawGearIcon(renderTarget_, d2dFactory_, mutedBrush_, surfaceBrush_, D2D1::Point2F(314, HeaderCenterY));
         drawText(renderTarget_, titleFormat_, mutedBrush_, L"×", D2D1::RectF(348, 9, 378, 42));
         renderTarget_->DrawLine(D2D1::Point2F(0, 49), D2D1::Point2F(MainWidth, 49), lineBrush_, 1);
     }
@@ -672,24 +750,32 @@ void App::paint() {
                     D2D1::RectF(x + width - 40, y + 8, x + width - 6, y + 27));
                 labelFormat_->SetTextAlignment(alignment);
             }
-            drawText(renderTarget_, valueFormat ? valueFormat : metricFormat_, textBrush_, value,
-                D2D1::RectF(valueFormat ? x + 2 : x + 10, y + 26, valueFormat ? x + width - 2 : x + width - 8, y + 57));
+            const auto valueBox = D2D1::RectF(valueFormat ? x + 2 : x + 10, y + 26,
+                valueFormat ? x + width - 2 : x + width - 8, y + 57);
+            if (valueFormat)
+                drawFittedText(renderTarget_, writeFactory_, valueFormat, textBrush_, value, valueBox);
+            else drawText(renderTarget_, metricFormat_, textBrush_, value, valueBox);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + width - 10, y + 61), 2, 2), lineBrush_);
             renderTarget_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x + 10, y + 58, x + 10 + (width - 20) * std::clamp(level, 0.0f, 1.0f), y + 61), 2, 2), accentBrush_);
         };
 
-        std::wstring cpu = snapshot_.packageTemperature >= 0 ? numberText(snapshot_.packageTemperature, L"°C") : L"—";
+        const bool thermalZone = local_ && snapshot_.packageTemperature < 0 && snapshot_.thermalZoneTemperature >= 0;
+        const double temperature = thermalZone ? snapshot_.thermalZoneTemperature : snapshot_.packageTemperature;
+        const bool cpuLoad = local_ && temperature < 0 && snapshot_.cpuUsagePercent >= 0;
+        const std::wstring cpuLabel = thermalZone ? L"CPU温区" : (cpuLoad ? L"CPU负载" : powerLabel(L"CPU", L"CPU·—W", snapshot_.packagePowerWatts));
+        std::wstring cpu = temperature >= 0 ? numberText(temperature, L"°C") :
+            (cpuLoad ? numberText(snapshot_.cpuUsagePercent, L"%") : L"—");
         std::wstring gpu = !snapshot_.gpus.empty() && snapshot_.gpus[0].temperature >= 0 ? numberText(snapshot_.gpus[0].temperature, L"°C") : L"—";
         const double gpuPower = snapshot_.gpus.empty() ? -1.0 : snapshot_.gpus[0].powerWatts;
-        card(14, 62, 82, powerLabel(L"CPU", L"CPU·—W", snapshot_.packagePowerWatts), cpu,
-            snapshot_.packageTemperature > 0 ? static_cast<float>(snapshot_.packageTemperature / 100.0) : 0);
+        card(14, 62, 82, cpuLabel, cpu,
+            static_cast<float>(cpuLoad ? snapshot_.cpuUsagePercent / 100.0 : std::max(0.0, temperature) / 100.0));
         card(104, 62, 82, powerLabel(L"GPU", L"GPU", gpuPower), gpu,
             !snapshot_.gpus.empty() ? static_cast<float>(snapshot_.gpus[0].temperature / 100.0) : 0);
-        card(194, 62, 82, L"内存", snapshot_.memoryTotal ? storageText(snapshot_.memoryUsed) : L"—",
-            ratio(snapshot_.memoryUsed, snapshot_.memoryTotal), compactFormat_,
+        card(194, 62, 82, L"RAM", snapshot_.memoryTotal ? storageText(snapshot_.memoryUsed) : L"—",
+            ratio(snapshot_.memoryUsed, snapshot_.memoryTotal), capacityFormat_ ? capacityFormat_ : compactFormat_,
             snapshot_.memoryTotal ? numberText(ratio(snapshot_.memoryUsed, snapshot_.memoryTotal) * 100, L"%") : L"—");
-        card(284, 62, 82, L"存储", snapshot_.diskTotal ? storageText(snapshot_.diskUsed) : L"—",
-            ratio(snapshot_.diskUsed, snapshot_.diskTotal), compactFormat_,
+        card(284, 62, 82, L"SSD", snapshot_.diskTotal ? storageText(snapshot_.diskUsed) : L"—",
+            ratio(snapshot_.diskUsed, snapshot_.diskTotal), capacityFormat_ ? capacityFormat_ : compactFormat_,
             snapshot_.diskTotal ? numberText(ratio(snapshot_.diskUsed, snapshot_.diskTotal) * 100, L"%") : L"—");
 
         std::vector<double> coreTemperatures;
@@ -700,64 +786,54 @@ void App::paint() {
         }
         std::sort(coreTemperatures.begin(), coreTemperatures.end(),
             [](double left, double right) { return left > right; });
-        drawText(renderTarget_, labelFormat_, mutedBrush_, L"Cores", D2D1::RectF(18, 139, 84, 163));
-        if (coreTemperatures.empty()) {
-            drawText(renderTarget_, compact, mutedBrush_, L"—", D2D1::RectF(96, 139, 182, 163));
+        if (local_) {
+            const auto topology = snapshot_.cpuPhysicalCores && snapshot_.cpuLogicalProcessors ?
+                std::to_wstring(snapshot_.cpuPhysicalCores) + L"C/" + std::to_wstring(snapshot_.cpuLogicalProcessors) + L"T" : L"—";
+            drawParameterRow(renderTarget_, writeFactory_, labelFormat_, compact, mutedBrush_, 139, 163,
+                {L"CPU:", snapshot_.cpuUsagePercent >= 0 ? numberText(snapshot_.cpuUsagePercent, L"%") : L"—",
+                 snapshot_.cpuClockMHz > 0 ? numberText(snapshot_.cpuClockMHz, L"MHz") : L"—", topology});
         } else {
-            ID2D1Brush* rankBrushes[] = {rankRedBrush_, rankYellowBrush_, rankGreenBrush_};
+            std::array<std::wstring, 4> coreValues{L"Cores", L"—", L"", L""};
             const std::size_t count = std::min<std::size_t>(3, coreTemperatures.size());
-            constexpr float slotWidth = 86.0f;
-            constexpr float startX = 96.0f;
-            for (std::size_t index = 0; index < count; ++index) {
-                const float x = startX + slotWidth * static_cast<float>(index);
-                drawText(renderTarget_, compact, rankBrushes[index],
-                    numberText(coreTemperatures[index], L"°C"),
-                    D2D1::RectF(x, 139, x + slotWidth, 163));
-            }
+            for (std::size_t index = 0; index < count; ++index)
+                coreValues[index + 1] = numberText(coreTemperatures[index], L"°C");
+            drawParameterRow(renderTarget_, writeFactory_, labelFormat_, compact, mutedBrush_, 139, 163,
+                coreValues, {mutedBrush_, count ? rankRedBrush_ : mutedBrush_, rankYellowBrush_, rankGreenBrush_});
         }
 
         const double fanPercent = snapshot_.gpus.empty() ? -1.0 : snapshot_.gpus[0].fanPercent;
-        const std::wstring fan = L"GPU风扇 " + (std::isfinite(fanPercent) && fanPercent >= 0.0 && fanPercent <= 100.0
+        const std::wstring fan = L"FAN:" + (std::isfinite(fanPercent) && fanPercent >= 0.0 && fanPercent <= 100.0
             ? numberText(fanPercent, L"%") : L"—");
-        const std::wstring ssd = L"SSD温度 " + (std::isfinite(snapshot_.ssdTemperature) && snapshot_.ssdTemperature >= 0.0
-            ? numberText(snapshot_.ssdTemperature, L"°C") : L"—");
-        std::wstring vram = L"显存占用 —";
+        const std::wstring ssd = std::isfinite(snapshot_.ssdTemperature) && snapshot_.ssdTemperature >= 0.0
+            ? numberText(snapshot_.ssdTemperature, L"°C") : L"—";
+        std::wstring vramPercent = L"—%";
         double memoryClock = -1.0;
         if (!snapshot_.gpus.empty()) {
             const auto& device = snapshot_.gpus[0];
             memoryClock = device.memoryClockMHz;
             if (device.memoryTotal && device.memoryUsed <= device.memoryTotal) {
-                wchar_t usage[80]{};
-                swprintf(usage, 80, L"显存占用 %.2fGB-%.0f%%",
-                    static_cast<double>(device.memoryUsed) / (1024.0 * 1024 * 1024),
-                    100.0 * static_cast<double>(device.memoryUsed) / device.memoryTotal);
-                vram = usage;
+                vramPercent = numberText(100.0 * static_cast<double>(device.memoryUsed) / device.memoryTotal, L"%");
             }
         }
-        const std::wstring memoryRate = L"内存频率 " + (snapshot_.memoryRateMTs
-            ? std::to_wstring(snapshot_.memoryRateMTs) + L"MT/s" : L"—");
-        const std::wstring vramClock = L"显存频率 " + (std::isfinite(memoryClock) && memoryClock >= 0.0
+        const std::wstring memoryRate = snapshot_.memoryRateMTs
+            ? std::to_wstring(snapshot_.memoryRateMTs) + L"MT/s" : L"—";
+        const std::wstring vramClock = std::wstring{} + (std::isfinite(memoryClock) && memoryClock >= 0.0
             ? numberText(memoryClock, L"MHz") : L"—");
-        drawText(renderTarget_, labelFormat_, mutedBrush_, fan, D2D1::RectF(18, 164, 132, 186));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, vram, D2D1::RectF(140, 164, 362, 186));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, ssd, D2D1::RectF(18, 188, 123, 210));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, memoryRate, D2D1::RectF(130, 188, 250, 210));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, vramClock, D2D1::RectF(256, 188, 366, 210));
+        const std::wstring swap = snapshot_.swapAvailable
+            ? (snapshot_.swapUsed ? humanBytes(snapshot_.swapUsed, false) : std::wstring(L"0 B")) : L"—";
+        drawParameterRow(renderTarget_, writeFactory_, labelFormat_, labelFormat_, mutedBrush_, 164, 186,
+            {L"GPU:", vramPercent, vramClock, fan});
+        drawParameterRow(renderTarget_, writeFactory_, labelFormat_, labelFormat_, mutedBrush_, 188, 210,
+            {L"SSD", ssd, memoryRate, swap});
 
         renderTarget_->DrawLine(D2D1::Point2F(14, 216), D2D1::Point2F(366, 216), lineBrush_, 1);
-        drawText(renderTarget_, labelFormat_, mutedBrush_, L"↓ 下载", D2D1::RectF(18, 220, 128, 237));
-        drawText(renderTarget_, labelFormat_, mutedBrush_, L"↑ 上传", D2D1::RectF(136, 220, 246, 237));
-        const auto labelAlignment = labelFormat_->GetTextAlignment();
-        labelFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-        drawText(renderTarget_, labelFormat_, mutedBrush_, L"网卡", D2D1::RectF(254, 220, 362, 237));
-        labelFormat_->SetTextAlignment(labelAlignment);
         const auto valueAlignment = compact->GetTextAlignment();
         compact->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        drawText(renderTarget_, compact, textBrush_, humanBytes(snapshot_.networkDown, true), D2D1::RectF(18, 237, 128, 261));
-        drawText(renderTarget_, compact, textBrush_, humanBytes(snapshot_.networkUp, true), D2D1::RectF(136, 237, 246, 261));
+        drawText(renderTarget_, compact, textBrush_, L"↓ " + humanBytes(snapshot_.networkDown, true), D2D1::RectF(18, 222, 128, 254));
+        drawText(renderTarget_, compact, textBrush_, L"↑ " + humanBytes(snapshot_.networkUp, true), D2D1::RectF(136, 222, 246, 254));
         compact->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         drawText(renderTarget_, compact, textBrush_, snapshot_.connected ? linkSpeedText(snapshot_.networkLinkMbps) : L"—",
-            D2D1::RectF(254, 237, 362, 261));
+            D2D1::RectF(254, 222, 362, 254));
         compact->SetTextAlignment(valueAlignment);
 
         if (transfer_.active || transfer_.completed || transfer_.failed) {
@@ -913,6 +989,18 @@ void App::collapseSide(bool left, HMONITOR targetMonitor) {
         static_cast<int>(monitor.rcWork.bottom) - height);
     startWindowAnimation(RECT{x, y, x + width, y + height},
         CollapseMode::Side, false);
+}
+
+void App::collapseNearestSide() {
+    if (isCollapsed() || animating_) return;
+    RECT current{};
+    GetWindowRect(window_, &current);
+    const auto targetMonitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor{sizeof(monitor)};
+    if (!GetMonitorInfoW(targetMonitor, &monitor)) return;
+    const auto leftDistance = std::abs(current.left - monitor.rcWork.left);
+    const auto rightDistance = std::abs(current.right - monitor.rcWork.right);
+    collapseSide(leftDistance <= rightDistance, targetMonitor);
 }
 
 void App::snapCompactAfterDrag() {
@@ -1078,7 +1166,7 @@ void App::rebuildSettingsFonts(UINT dpi) {
     settingsButtonFont_ = makeFont(13, FW_SEMIBOLD);
 
     if (settingsWindow_) {
-        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
+        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey, RefreshIntervalEdit};
         constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton, NewServer, ReopenServers, DeleteServer, BackgroundColor, ForegroundColor, OpenLocalFolder, CancelTransfer, ConnectionTab, TransferTab, AppearanceTab};
         for (int id : edits)
             SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
@@ -1124,27 +1212,31 @@ void App::layoutSettings(UINT dpi) {
     move(ForegroundColor, 252, 156, 198, 46);
     move(NextHotkey, 36, 274, 408, 24);
     move(PreviousHotkey, 36, 354, 408, 24);
+    move(RefreshIntervalEdit, 344, 434, 100, 22);
     move(CancelTransfer, 24, 496, 116, 34);
     move(UploadButton, 234, 496, 104, 34);
     move(DownloadButton, 350, 496, 106, 34);
     move(SaveConnect, 300, 496, 156, 34);
     constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit,
-        LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey};
+        LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey, RefreshIntervalEdit};
     for (int id : edits) SendDlgItemMessageW(settingsWindow_, id, EM_SETMARGINS,
         EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(p(2), p(2)));
     selectSettingsTab(settingsTab_);
 }
 
 void App::selectSettingsTab(int tab) {
-    settingsTab_ = std::clamp(tab, 0, 2);
+    settingsTab_ = local_ && tab == 1 ? 0 : std::clamp(tab, 0, 2);
     auto visible = [&](int id, bool show) {
         ShowWindow(GetDlgItem(settingsWindow_, id), show ? SW_SHOWNA : SW_HIDE);
     };
-    for (int id : {ServerName, HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit,
-        NewServer, ReopenServers, DeleteServer}) visible(id, settingsTab_ == 0);
+    visible(ServerName, settingsTab_ == 0);
+    for (int id : {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, DeleteServer})
+        visible(id, settingsTab_ == 0 && !local_);
+    for (int id : {NewServer, ReopenServers}) visible(id, settingsTab_ == 0);
+    EnableWindow(GetDlgItem(settingsWindow_, TransferTab), !local_);
     for (int id : {LocalEdit, RemoteEdit, BrowseLocal, OpenLocalFolder, EntireFolder,
         SelectedFiles, UploadButton, DownloadButton, CancelTransfer}) visible(id, settingsTab_ == 1);
-    for (int id : {BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey})
+    for (int id : {BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey, RefreshIntervalEdit})
         visible(id, settingsTab_ == 2);
     visible(SaveConnect, settingsTab_ != 1);
     RedrawWindow(settingsWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
@@ -1177,7 +1269,7 @@ void App::paintSettings(HDC destination) {
         DrawTextW(buffer, value.c_str(), -1, &rect,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
     };
-    text(L"服务器设置", 24, 14, 370, 26, fg);
+    text(local_ ? L"本机监控设置" : L"服务器设置", 24, 14, 370, 26, fg);
     SelectObject(buffer, settingsLabelFont_);
     text(wide(windowTitle()), 24, 42, 392, 20, muted);
     RECT close{p(430), p(16), p(456), p(44)};
@@ -1187,7 +1279,13 @@ void App::paintSettings(HDC destination) {
     auto field = [&](int x, int y, int w, int h = 34) {
         RoundRect(buffer, p(x), p(y), p(x + w), p(y + h), p(12), p(12));
     };
-    if (settingsTab_ == 0) {
+    if (settingsTab_ == 0 && local_) {
+        text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
+        text(L"当前 Windows 主机 · 自动监控", 30, 216, 420, 28, fg);
+        text(L"无需填写 SSH 地址、账号或密码", 30, 256, 420, 24, muted);
+        text(L"温度与功耗取决于硬件和传感器支持", 30, 292, 420, 24, muted);
+        text(L"显示“CPU温区”时，数值来自 Windows 温区", 30, 328, 420, 24, muted);
+    } else if (settingsTab_ == 0) {
         text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
         text(L"主机地址", 30, 202, 290, 20, muted); field(30, 225, 298);
         text(L"端口", 346, 202, 100, 20, muted); field(346, 225, 104);
@@ -1206,10 +1304,12 @@ void App::paintSettings(HDC destination) {
         text(L"浮窗、收起状态与设置页使用同一配色", 30, 212, 420, 20, muted);
         text(L"下一个服务器窗口", 30, 244, 420, 20, muted); field(30, 268, 420, 36);
         text(L"上一个服务器窗口", 30, 324, 420, 20, muted); field(30, 348, 420, 36);
-        text(L"点击输入框录入组合键，至少包含 Ctrl 或 Alt", 30, 402, 420, 22, muted);
+        text(L"快捷键至少包含 Ctrl 或 Alt；刷新间隔仅用于当前服务器", 30, 398, 420, 22, muted);
+        text(L"监控刷新间隔（1–3600 秒）", 30, 434, 300, 22, muted); field(338, 428, 112, 36);
     }
     MoveToEx(buffer, p(24), p(480), nullptr); LineTo(buffer, p(456), p(480));
-    if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" : L"连接信息仅用于当前服务器", 24, 500, 264, 26, muted);
+    if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" :
+        (local_ ? L"本机监控无需 SSH 连接" : L"连接信息仅用于当前服务器"), 24, 500, 264, 26, muted);
     SelectObject(buffer, oldFont);
     SelectObject(buffer, oldBrush);
     SelectObject(buffer, oldPen);
@@ -1275,9 +1375,9 @@ void App::createSettingsWindow() {
     DwmSetWindowAttribute(settingsWindow_, cornerAttribute, &roundPreference, sizeof(roundPreference));
     rebuildSettingsFonts(dpi);
 
-    addControl(settingsWindow_, WC_BUTTONW, L"连接", BS_OWNERDRAW, 0, 0, 1, 1, ConnectionTab, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, local_ ? L"本机" : L"连接", BS_OWNERDRAW, 0, 0, 1, 1, ConnectionTab, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"文件传输", BS_OWNERDRAW, 0, 0, 1, 1, TransferTab, settingsButtonFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"外观", BS_OWNERDRAW, 0, 0, 1, 1, AppearanceTab, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, L"外观与监控", BS_OWNERDRAW, 0, 0, 1, 1, AppearanceTab, settingsButtonFont_);
     HWND host = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, HostEdit, uiFont_);
     HWND port = addControl(settingsWindow_, WC_EDITW, L"22", ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 1, 1, PortEdit, uiFont_);
     HWND user = addControl(settingsWindow_, WC_EDITW, L"", ES_AUTOHSCROLL, 0, 0, 1, 1, UserEdit, uiFont_);
@@ -1288,7 +1388,7 @@ void App::createSettingsWindow() {
     addControl(settingsWindow_, WC_BUTTONW, L"浏览", BS_OWNERDRAW, 0, 0, 1, 1, BrowseLocal, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"打开", BS_OWNERDRAW, 0, 0, 1, 1, OpenLocalFolder, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"停止传输", BS_OWNERDRAW, 0, 0, 1, 1, CancelTransfer, settingsButtonFont_);
-    addControl(settingsWindow_, WC_BUTTONW, L"连接并监控", BS_OWNERDRAW, 0, 0, 1, 1, SaveConnect, settingsButtonFont_);
+    addControl(settingsWindow_, WC_BUTTONW, local_ ? L"保存并监控" : L"连接并监控", BS_OWNERDRAW, 0, 0, 1, 1, SaveConnect, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"上传", BS_OWNERDRAW, 0, 0, 1, 1, UploadButton, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"下载", BS_OWNERDRAW, 0, 0, 1, 1, DownloadButton, settingsButtonFont_);
 
@@ -1315,6 +1415,8 @@ void App::createSettingsWindow() {
     InitCommonControlsEx(&controls);
     addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, NextHotkey, uiFont_);
     addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, PreviousHotkey, uiFont_);
+    addControl(settingsWindow_, WC_EDITW, L"2", ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 1, 1, RefreshIntervalEdit, uiFont_);
+    SendDlgItemMessageW(settingsWindow_, RefreshIntervalEdit, EM_SETLIMITTEXT, 4, 0);
     layoutSettings(dpi);
 }
 void App::positionSettings() {
@@ -1448,6 +1550,7 @@ void App::showSettings() {
         return;
     }
     if (!settingsLoaded_) {
+        SetDlgItemInt(settingsWindow_, RefreshIntervalEdit, refreshIntervalSeconds_.load(), FALSE);
         SetWindowTextW(GetDlgItem(settingsWindow_, ServerName), wide(serverName_).c_str());
         SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_SETHOTKEY, root_->nextHotkey_, 0);
         SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, root_->previousHotkey_, 0);
@@ -1576,6 +1679,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         case BackgroundColor: chooseTheme(true); return 0;
         case ForegroundColor: chooseTheme(false); return 0;
         case DeleteServer: {
+            if (local_) return 0;
             if (MessageBoxW(settingsWindow_, L"删除此服务器的已保存配置并关闭窗口？",
                 L"AirSFTP", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
             deleted_ = true;
@@ -1616,6 +1720,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
     return DefWindowProcW(window, message, wParam, lParam);
 }
 bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::string& remotePath) {
+    if (local_) { config = {}; localPath = localPath_; remotePath = remotePath_; return true; }
     config.host = utf8(controlText(settingsWindow_, HostEdit));
     config.username = utf8(controlText(settingsWindow_, UserEdit));
     config.password = utf8(controlText(settingsWindow_, PasswordEdit));
@@ -1637,7 +1742,23 @@ bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::st
     return true;
 }
 
+bool App::readRefreshInterval(std::uint32_t& seconds) const {
+    const auto input = controlText(settingsWindow_, RefreshIntervalEdit);
+    if (input.empty() || input.size() > 4 ||
+        !std::all_of(input.begin(), input.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; })) return false;
+    seconds = 0;
+    for (wchar_t c : input) seconds = seconds * 10 + static_cast<unsigned>(c - L'0');
+    return seconds >= 1 && seconds <= 3600;
+}
+
 bool App::rememberConnection(const ConnectionConfig& config, const std::string& local, const std::string& remote) {
+    std::uint32_t interval = 2;
+    if (!readRefreshInterval(interval)) {
+        MessageBoxW(settingsWindow_, L"监控刷新间隔请输入 1–3600 的整数，单位为秒。", L"AirSFTP", MB_OK | MB_ICONWARNING);
+        selectSettingsTab(2);
+        SetFocus(GetDlgItem(settingsWindow_, RefreshIntervalEdit));
+        return false;
+    }
     const auto old = profile();
     const auto oldNext = root_->nextHotkey_, oldPrevious = root_->previousHotkey_;
     const auto next = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_GETHOTKEY, 0, 0));
@@ -1648,6 +1769,7 @@ bool App::rememberConnection(const ConnectionConfig& config, const std::string& 
     remotePath_ = remote;
     serverName_ = utf8(controlText(settingsWindow_, ServerName));
     if (serverName_.empty()) serverName_ = config_.host;
+    refreshIntervalSeconds_ = interval;
     if (!saveServers()) {
         applyProfile(old);
         setHotkeys(oldNext, oldPrevious, false);
@@ -1702,6 +1824,13 @@ void App::postTransfer(TransferProgress progress, std::uintptr_t generation) {
         reinterpret_cast<LPARAM>(value.get()))) value.release();
 }
 
+void App::waitRefreshInterval(std::stop_token token) const {
+    const auto start = std::chrono::steady_clock::now();
+    while (!token.stop_requested() && std::chrono::steady_clock::now() - start <
+        std::chrono::seconds(refreshIntervalSeconds_.load()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
 void App::startMonitor(const ConnectionConfig& config) {
     stopMonitor();
     const auto generation = monitorGeneration_;
@@ -1712,6 +1841,14 @@ void App::startMonitor(const ConnectionConfig& config) {
     monitorThread_ = std::jthread([this, config, generation,
         previous = std::move(monitorThread_)](std::stop_token token) mutable {
         if (previous.joinable()) previous.join();
+        if (local_) {
+            LocalTelemetry sampler;
+            while (!token.stop_requested()) {
+                postSnapshot(sampler.sample(), generation);
+                waitRefreshInterval(token);
+            }
+            return;
+        }
         while (!token.stop_requested()) {
             SshSession session(token);
             TelemetryParser parser; // Reconnects must not reuse counters from an old boot.
@@ -1732,7 +1869,7 @@ void App::startMonitor(const ConnectionConfig& config) {
                 auto value = parser.parse(output, latency);
                 value.fingerprint = session.fingerprint();
                 postSnapshot(std::move(value), generation);
-                sleepStopped(token, std::chrono::seconds(2));
+                waitRefreshInterval(token);
             }
             session.disconnect();
             sleepStopped(token, std::chrono::seconds(2));
@@ -1746,6 +1883,7 @@ void App::stopMonitor() {
 }
 
 void App::startTransfer(TransferDirection direction) {
+    if (local_) return;
     if (transfer_.active) {
         MessageBoxW(settingsWindow_, L"当前正在传输，请先停止或等待完成。", L"AirSFTP", MB_OK);
         return;

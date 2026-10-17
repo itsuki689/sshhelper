@@ -34,15 +34,18 @@ std::vector<App*> App::servers() {
 }
 
 void App::applyProfile(const ServerProfile& value) {
-    config_ = value.connection;
+    local_ = value.local;
+    config_ = local_ ? ConnectionConfig{} : value.connection;
     serverName_ = value.name.empty() ? value.connection.host : value.name;
     localPath_ = value.localFolder;
     remotePath_ = value.remoteFolder;
     background_ = value.background;
     foreground_ = value.foreground;
+    refreshIntervalSeconds_ = std::clamp(value.refreshIntervalSeconds, 1u, 3600u);
 }
 
 std::string App::windowTitle() const {
+    if (local_) return (detectedHostName_.empty() ? std::string("本机") : detectedHostName_ + " · 本机");
     if (!detectedHostName_.empty()) return detectedHostName_;
     if (!serverName_.empty()) return serverName_;
     return config_.host.empty() ? "AirSFTP" : config_.host;
@@ -50,12 +53,14 @@ std::string App::windowTitle() const {
 
 ServerProfile App::profile() const {
     ServerProfile value;
+    value.local = local_;
     value.connection = config_;
     value.name = serverName_;
     value.localFolder = localPath_;
     value.remoteFolder = remotePath_;
     value.background = background_;
     value.foreground = foreground_;
+    value.refreshIntervalSeconds = refreshIntervalSeconds_.load();
     return value;
 }
 
@@ -64,7 +69,7 @@ bool App::saveServers() {
     saved.nextHotkey = root_->nextHotkey_;
     saved.previousHotkey = root_->previousHotkey_;
     for (auto* server : servers())
-        if (!server->config_.host.empty()) saved.servers.push_back(server->profile());
+        if (server->local_ || !server->config_.host.empty()) saved.servers.push_back(server->profile());
     std::string error;
     if (saveServerSettings(defaultCredentialPath(), saved, error)) return true;
     MessageBoxW(settingsWindow_ ? settingsWindow_ : window_, wide(error).c_str(),
@@ -73,7 +78,8 @@ bool App::saveServers() {
 }
 
 void App::addServer() {
-    if (servers().size() >= 64) {
+    const auto all = servers();
+    if (std::count_if(all.begin(), all.end(), [](App* app) { return !app->local_; }) >= 64) {
         MessageBoxW(settingsWindow_, L"最多支持 64 台服务器。", L"AirSFTP", MB_OK);
         return;
     }
@@ -91,13 +97,23 @@ void App::addServer() {
     added->showSettings();
 }
 
+void App::showLocalMonitor() {
+    for (auto* server : servers()) {
+        if (!server->local_) continue;
+        if (!server->window_ && server->createMainWindow(SW_HIDE)) server->startMonitor({});
+        server->showWhenConnected_ = false;
+        server->showAtBottomRight();
+        return;
+    }
+}
+
 void App::reopenServers() {
     for (auto* server : servers()) {
         if (server->window_) { server->showWhenConnected_ = false; server->showAtBottomRight(); continue; }
         server->collapseMode_ = CollapseMode::Expanded;
         server->animating_ = false;
         server->hasExpandedRect_ = false;
-        if (server->createMainWindow(SW_SHOWNOACTIVATE) && !server->config_.host.empty())
+        if (server->createMainWindow(SW_SHOWNOACTIVATE) && (server->local_ || !server->config_.host.empty()))
             server->startMonitor(server->config_);
     }
 }
@@ -178,7 +194,7 @@ void App::chooseTheme(bool background) {
     const auto old = color;
     color = (std::uint32_t(GetRValue(dialog.rgbResult)) << 16) |
         (std::uint32_t(GetGValue(dialog.rgbResult)) << 8) | GetBValue(dialog.rgbResult);
-    if (!config_.host.empty() && !saveServers()) color = old;
+    if ((local_ || !config_.host.empty()) && !saveServers()) color = old;
     discardGraphics();
     InvalidateRect(window_, nullptr, FALSE);
     if (settingsWindow_) RedrawWindow(settingsWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
@@ -201,6 +217,7 @@ void App::dropFiles(HDROP drop) {
 }
 
 void App::uploadDropped(std::vector<std::string> paths) {
+    if (local_) return;
     if (transfer_.active) {
         MessageBoxW(window_, L"当前窗口正在传输，请完成后再拖入文件。", L"AirSFTP", MB_OK);
         return;
@@ -259,6 +276,7 @@ bool App::confirmTransfer(std::size_t count, std::uint64_t bytes, TransferDirect
 }
 
 void App::openLocalFolder() {
+    if (local_) return;
     std::string path = transferLocalFolder_.empty() ? localPath_ : transferLocalFolder_;
     if (settingsWindow_ && IsWindowVisible(settingsWindow_)) {
         const auto edit = GetDlgItem(settingsWindow_, LocalEdit);

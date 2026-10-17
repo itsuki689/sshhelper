@@ -28,7 +28,7 @@ private:
         LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton,
         EntireFolder, SelectedFiles, ServerName, NewServer, ReopenServers, DeleteServer,
         BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey, OpenLocalFolder, CancelTransfer,
-        ConnectionTab, TransferTab, AppearanceTab
+        ConnectionTab, TransferTab, AppearanceTab, RefreshIntervalEdit
     };
     enum class CollapseMode { Expanded, Horizontal, Side };
     static LRESULT CALLBACK mainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -45,6 +45,7 @@ private:
     void showAtBottomRight();
     void hideToTray();
     void quitApplication();
+    void restartApplication();
     HWND trayWindow_ = nullptr;
     bool trayAdded_ = false;
     bool exiting_ = false;
@@ -83,6 +84,7 @@ private:
     void toggleCollapsed();
     void collapseHorizontal(bool dockToTop, HMONITOR monitor = nullptr);
     void collapseSide(bool left, HMONITOR monitor = nullptr);
+    void collapseNearestSide();
     void snapCompactAfterDrag();
     void updateRestoreAnchor(HMONITOR monitor, const RECT& compactRect, CollapseMode mode);
     void startWindowAnimation(const RECT& target, CollapseMode targetMode, bool clearExpandedRect);
@@ -100,6 +102,7 @@ private:
     std::string windowTitle() const;
     bool saveServers();
     void addServer();
+    void showLocalMonitor();
     void reopenServers();
     void switchServer(bool previous);
     bool setHotkeys(unsigned next, unsigned previous, bool reportError);
@@ -120,12 +123,16 @@ private:
     App* root_ = this;
     std::vector<std::unique_ptr<App>> children_;
     bool deleted_ = false;
+    bool local_ = false;
     std::string serverName_;
     std::string detectedHostName_;
     std::uint32_t background_ = 0xFFFFFF, foreground_ = 0x1D1D1F;
+    std::atomic<std::uint32_t> refreshIntervalSeconds_{2};
     unsigned nextHotkey_ = 0x064E, previousHotkey_ = 0x0650;
     bool hotkeysRegistered_ = false;
     std::size_t windowSlot_ = 0;
+    bool readRefreshInterval(std::uint32_t& seconds) const;
+    void waitRefreshInterval(std::stop_token token) const;
     void startMonitor(const ConnectionConfig& config);
     void stopMonitor();
     void startTransfer(TransferDirection direction);
@@ -149,6 +156,7 @@ private:
     RECT expandedRect_{};
     bool hasExpandedRect_ = false;
     bool compactPointerDown_ = false;
+    bool titlePointerDown_ = false;
     bool compactDragging_ = false;
     POINT compactPressCursor_{};
     RECT compactPressRect_{};
@@ -176,6 +184,7 @@ private:
     IDWriteTextFormat* metricFormat_ = nullptr;
     IDWriteTextFormat* labelFormat_ = nullptr;
     IDWriteTextFormat* compactFormat_ = nullptr;
+    IDWriteTextFormat* capacityFormat_ = nullptr;
 
     TelemetrySnapshot snapshot_;
     TransferProgress transfer_;
