@@ -53,6 +53,8 @@ struct TelemetrySnapshot {
     std::uint64_t diskTotal = 0;
     std::uint64_t networkDown = 0;
     std::uint64_t networkUp = 0;
+    // Distinguish a valid zero rate from a missing interface or a reset baseline.
+    bool networkRatesAvailable = false;
     // Negotiated link speed of the sampled interface; zero means unavailable.
     std::uint64_t networkLinkMbps = 0;
     double sshLatencyMs = 0.0;

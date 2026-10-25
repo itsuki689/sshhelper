@@ -8,3 +8,4 @@ AirSFTP.known_hosts
 AirSFTP.credentials
 dist/*
 !dist/AirSFTP.exe
+!dist/sshhelper-tool.exe

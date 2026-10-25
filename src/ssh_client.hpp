@@ -2,6 +2,7 @@
 
 #include "models.hpp"
 
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -17,7 +18,8 @@ using TransferConfirmation = std::function<bool(std::size_t, std::uint64_t)>;
 
 class SshSession {
 public:
-    explicit SshSession(std::stop_token stop = {}, long timeoutMs = 15000);
+    explicit SshSession(std::stop_token stop = {}, long timeoutMs = 15000,
+                        std::filesystem::path hostKeyStore = {}, bool trustNewHosts = true);
     ~SshSession();
     SshSession(const SshSession&) = delete;
     SshSession& operator=(const SshSession&) = delete;
@@ -63,6 +65,8 @@ private:
 
     std::stop_token stop_;
     long timeoutMs_;
+    std::filesystem::path hostKeyStore_;
+    bool trustNewHosts_;
     std::mutex socketMutex_;
     std::optional<std::stop_callback<std::function<void()>>> cancellation_;
     LIBSSH2_SESSION* session_ = nullptr;

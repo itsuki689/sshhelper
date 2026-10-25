@@ -20,6 +20,20 @@ int runTests() {
     CHECK(listen(listener,4)==0);
     int length=sizeof(address);getsockname(listener,reinterpret_cast<sockaddr*>(&address),&length);
     ConnectionConfig config;config.host="127.0.0.1";config.port=ntohs(address.sin_port);config.username="test";
+    // Monitoring may use only existing pins, and must never create a trust file.
+    const auto readOnlyPins = root / "readonly.known_hosts";
+    {
+        SshSession readOnly({}, 15000, readOnlyPins, false);
+        CHECK(!readOnly.connect(config, error));
+        CHECK(error.find("not pinned") != std::string::npos && !fs::exists(readOnlyPins));
+    }
+    std::ofstream(readOnlyPins) << config.host << ':' << config.port << " wrong-fingerprint\n";
+    {
+        SshSession changed({}, 15000, readOnlyPins, false);
+        CHECK(!changed.connect(config, error));
+        CHECK(error.find("host key changed") != std::string::npos);
+        CHECK(read(readOnlyPins).find("wrong-fingerprint") != std::string::npos);
+    }
     std::stop_source stop;
     SshSession session(stop.get_token());
     CHECK(session.connect(config,error));

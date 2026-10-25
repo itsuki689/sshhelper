@@ -385,6 +385,7 @@ struct LocalTelemetry::Impl {
             if (previous.time_since_epoch().count() && luid == best->InterfaceLuid.Value && seconds > 0 && best->InOctets >= rx && best->OutOctets >= tx) {
                 out.networkDown = static_cast<std::uint64_t>((best->InOctets - rx) / seconds);
                 out.networkUp = static_cast<std::uint64_t>((best->OutOctets - tx) / seconds);
+                out.networkRatesAvailable = true;
             }
             luid = best->InterfaceLuid.Value; rx = best->InOctets; tx = best->OutOctets; previous = now;
         } else previous = {};

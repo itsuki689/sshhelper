@@ -54,6 +54,7 @@ int main() {
     CHECK(parser.parse("HOST|\n", 1.0).hostName.empty());
     CHECK(next.networkDown > 0);
     CHECK(next.networkUp > 0);
+    CHECK(next.networkRatesAvailable);
 
     // Missing/malformed samples and interface changes must reset the baseline.
     TelemetryParser networkParser;
@@ -61,8 +62,10 @@ int main() {
     networkParser.parse("AIR|3\nEND|1\n", 1.0);
     auto recovered = networkParser.parse("NET|eth0|1000000|2000000\n", 1.0);
     CHECK(recovered.networkDown == 0 && recovered.networkUp == 0);
+    CHECK(!recovered.networkRatesAvailable);
     auto switched = networkParser.parse("NET|wlan0|900000000|900000000\n", 1.0);
     CHECK(switched.networkDown == 0 && switched.networkUp == 0);
+    CHECK(!switched.networkRatesAvailable);
     auto reset = networkParser.parse("NET|wlan0|10|20\n", 1.0);
     CHECK(reset.networkDown == 0 && reset.networkUp == 0);
     networkParser.parse("NET|wlan0|invalid|30\n", 1.0);
@@ -74,6 +77,7 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     auto active = networkParser.parse("NET|wlan0|4000|6000\n", 1.0);
     CHECK(active.networkDown > 0 && active.networkUp > 0);
+    CHECK(active.networkRatesAvailable);
 
     // Link speed is independent of traffic rate and must not survive a missing sample.
     CHECK(parser.parse("NET|enp5s0|100|200|1000\n", 1.0).networkLinkMbps == 1000);

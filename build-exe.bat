@@ -16,7 +16,10 @@ if errorlevel 1 goto :failed
 if not exist dist mkdir dist
 copy /B /Y "build\AirSFTP.exe" "dist\AirSFTP.exe" >nul
 if errorlevel 1 goto :failed
+copy /B /Y "build\sshhelper-tool.exe" "dist\sshhelper-tool.exe" >nul
+if errorlevel 1 goto :failed
 for %%I in ("dist\AirSFTP.exe") do echo Portable EXE ready: %%~fI  [%%~zI bytes]
+for %%I in ("dist\sshhelper-tool.exe") do echo Codex MCP tool ready: %%~fI  [%%~zI bytes]
 exit /b 0
 
 :failed

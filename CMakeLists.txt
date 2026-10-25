@@ -23,6 +23,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libssh2)
 
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(json
+  URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+  URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(json)
+
 add_library(airsftp_core STATIC
   src/credential_store.cpp
   src/ssh_client.cpp
@@ -51,6 +60,14 @@ if(MINGW)
   target_link_options(AirSFTP PRIVATE -static -static-libgcc -static-libstdc++ -municode)
 endif()
 
+add_library(sshhelper_api STATIC src/monitor_api.cpp src/mcp_server.cpp)
+target_link_libraries(sshhelper_api PUBLIC airsftp_core nlohmann_json::nlohmann_json)
+add_executable(sshhelper-tool src/tool_main.cpp)
+target_link_libraries(sshhelper-tool PRIVATE sshhelper_api)
+if(MINGW)
+  target_link_options(sshhelper-tool PRIVATE -static -static-libgcc -static-libstdc++ -municode)
+endif()
+
 add_executable(telemetry_parser_test tests/telemetry_parser_test.cpp)
 target_link_libraries(telemetry_parser_test PRIVATE airsftp_core)
 
@@ -61,6 +78,19 @@ add_executable(ssh_client_test tests/ssh_client_test.cpp)
 target_link_libraries(ssh_client_test PRIVATE airsftp_core)
 
 enable_testing()
+add_executable(monitor_api_test tests/monitor_api_test.cpp)
+target_link_libraries(monitor_api_test PRIVATE sshhelper_api)
+add_test(NAME monitor_api COMMAND monitor_api_test)
+set_tests_properties(monitor_api PROPERTIES TIMEOUT 15)
+add_executable(mcp_server_test tests/mcp_server_test.cpp)
+target_link_libraries(mcp_server_test PRIVATE sshhelper_api)
+add_test(NAME mcp_server COMMAND mcp_server_test)
+set_tests_properties(mcp_server PROPERTIES TIMEOUT 10)
+find_program(SSHHELPER_TEST_NODE node)
+if(SSHHELPER_TEST_NODE)
+  add_test(NAME mcp_stdio COMMAND "${SSHHELPER_TEST_NODE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_stdio_test.mjs" "$<TARGET_FILE:sshhelper-tool>")
+  set_tests_properties(mcp_stdio PROPERTIES TIMEOUT 20)
+endif()
 add_test(NAME telemetry_parser COMMAND telemetry_parser_test)
 add_executable(local_telemetry_test tests/local_telemetry_test.cpp)
 target_link_libraries(local_telemetry_test PRIVATE airsftp_core)
@@ -116,4 +146,4 @@ add_executable(live_telemetry_test EXCLUDE_FROM_ALL tests/live_telemetry_test.cp
 target_link_libraries(live_telemetry_test PRIVATE airsftp_core)
 set_target_properties(live_telemetry_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
 
-install(TARGETS AirSFTP RUNTIME DESTINATION .)
+install(TARGETS AirSFTP sshhelper-tool RUNTIME DESTINATION .)

@@ -430,6 +430,7 @@ TelemetrySnapshot TelemetryParser::parse(const std::string& text, double latency
         if (seconds > 0.0) {
             snapshot.networkDown = static_cast<std::uint64_t>((rx - previousRx_) / seconds);
             snapshot.networkUp = static_cast<std::uint64_t>((tx - previousTx_) / seconds);
+            snapshot.networkRatesAvailable = true;
         }
     }
     previousRx_ = rx;

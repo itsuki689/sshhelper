@@ -200,6 +200,126 @@ void drawParameterRow(ID2D1HwndRenderTarget* target, IDWriteFactory* factory,
     }
 }
 
+class SettingsCanvas {
+public:
+    SettingsCanvas(ID2D1Factory* factory, IDWriteFactory* textFactory, ID2D1DCRenderTarget*& target,
+                   HDC dc, const RECT& bounds, UINT dpi, bool modern)
+        : target_(target), textFactory_(textFactory), dc_(dc), bounds_(bounds), scale_(96.0f / dpi) {
+        if (!modern || !factory || !textFactory) return;
+        if (!target_) {
+            const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+            if (FAILED(factory->CreateDCRenderTarget(&properties, &target_))) return;
+        }
+        GdiFlush();
+        if (FAILED(target_->BindDC(dc, &bounds)) ||
+            FAILED(target_->CreateSolidColorBrush(D2D1::ColorF(0x000000), &brush_))) {
+            release(brush_); release(target_); return;
+        }
+        target_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
+        target_->SetTransform(D2D1::Matrix3x2F::Identity());
+        target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+        target_->BeginDraw();
+        modern_ = true;
+    }
+    ~SettingsCanvas() { if (!finished_) finish(); }
+
+    void clear(COLORREF color) {
+        if (modern_) target_->Clear(d2dColor(color));
+        else {
+            SetDCBrushColor(dc_, color);
+            FillRect(dc_, &bounds_, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        }
+    }
+    void rounded(const RECT& rect, int diameter, COLORREF fill, COLORREF border, int width) {
+        if (modern_) {
+            const auto shape = D2D1::RoundedRect(relative(rect), diameter * scale_ / 2, diameter * scale_ / 2);
+            brush_->SetColor(d2dColor(fill)); target_->FillRoundedRectangle(shape, brush_);
+            brush_->SetColor(d2dColor(border)); target_->DrawRoundedRectangle(shape, brush_, width * scale_);
+        } else {
+            auto brush = CreateSolidBrush(fill); auto pen = CreatePen(PS_SOLID, width, border);
+            const auto oldBrush = SelectObject(dc_, brush), oldPen = SelectObject(dc_, pen);
+            RoundRect(dc_, rect.left, rect.top, rect.right, rect.bottom, diameter, diameter);
+            SelectObject(dc_, oldBrush); SelectObject(dc_, oldPen); DeleteObject(brush); DeleteObject(pen);
+        }
+    }
+    void ellipse(const RECT& rect, COLORREF fill, COLORREF border, int width) {
+        if (modern_) {
+            const auto box = relative(rect);
+            const auto shape = D2D1::Ellipse(D2D1::Point2F((box.left + box.right) / 2, (box.top + box.bottom) / 2),
+                (box.right - box.left) / 2, (box.bottom - box.top) / 2);
+            brush_->SetColor(d2dColor(fill)); target_->FillEllipse(shape, brush_);
+            brush_->SetColor(d2dColor(border)); target_->DrawEllipse(shape, brush_, width * scale_);
+        } else {
+            auto brush = CreateSolidBrush(fill); auto pen = CreatePen(PS_SOLID, width, border);
+            const auto oldBrush = SelectObject(dc_, brush), oldPen = SelectObject(dc_, pen);
+            Ellipse(dc_, rect.left, rect.top, rect.right, rect.bottom);
+            SelectObject(dc_, oldBrush); SelectObject(dc_, oldPen); DeleteObject(brush); DeleteObject(pen);
+        }
+    }
+    void line(int x1, int y1, int x2, int y2, COLORREF color, int width) {
+        if (modern_) {
+            brush_->SetColor(d2dColor(color));
+            target_->DrawLine(D2D1::Point2F((x1 - bounds_.left) * scale_, (y1 - bounds_.top) * scale_),
+                D2D1::Point2F((x2 - bounds_.left) * scale_, (y2 - bounds_.top) * scale_), brush_, width * scale_);
+        } else {
+            auto pen = CreatePen(PS_SOLID, width, color); const auto old = SelectObject(dc_, pen);
+            MoveToEx(dc_, x1, y1, nullptr); LineTo(dc_, x2, y2);
+            SelectObject(dc_, old); DeleteObject(pen);
+        }
+    }
+    void text(const std::wstring& value, const RECT& rect, IDWriteTextFormat* format,
+              HFONT fallback, COLORREF color, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) {
+        if (value.empty()) return;
+        if (modern_) {
+            const auto box = relative(rect);
+            IDWriteTextLayout* layout = nullptr;
+            if (!format || FAILED(textFactory_->CreateTextLayout(value.c_str(), static_cast<UINT32>(value.size()),
+                    format, box.right - box.left, box.bottom - box.top, &layout))) { failed_ = true; return; }
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            layout->SetTextAlignment(alignment);
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            IDWriteInlineObject* ellipsis = nullptr;
+            if (SUCCEEDED(textFactory_->CreateEllipsisTrimmingSign(format, &ellipsis))) {
+                const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                layout->SetTrimming(&trimming, ellipsis); release(ellipsis);
+            }
+            brush_->SetColor(d2dColor(color));
+            target_->DrawTextLayout(D2D1::Point2F(box.left, box.top), layout, brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            release(layout);
+        } else {
+            const auto old = SelectObject(dc_, fallback); SetBkMode(dc_, TRANSPARENT); SetTextColor(dc_, color);
+            auto box = rect;
+            DrawTextW(dc_, value.c_str(), -1, &box, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS |
+                (alignment == DWRITE_TEXT_ALIGNMENT_CENTER ? DT_CENTER : DT_LEFT));
+            SelectObject(dc_, old);
+        }
+    }
+    bool finish() {
+        if (finished_) return !failed_;
+        finished_ = true;
+        if (modern_ && FAILED(target_->EndDraw())) failed_ = true;
+        release(brush_);
+        if (failed_) release(target_);
+        return !failed_;
+    }
+private:
+    static D2D1_COLOR_F d2dColor(COLORREF color) {
+        return D2D1::ColorF(GetRValue(color) / 255.0f, GetGValue(color) / 255.0f, GetBValue(color) / 255.0f);
+    }
+    D2D1_RECT_F relative(const RECT& rect) const {
+        return D2D1::RectF((rect.left - bounds_.left) * scale_, (rect.top - bounds_.top) * scale_,
+            (rect.right - bounds_.left) * scale_, (rect.bottom - bounds_.top) * scale_);
+    }
+    ID2D1DCRenderTarget*& target_;
+    IDWriteFactory* textFactory_;
+    ID2D1SolidColorBrush* brush_ = nullptr;
+    HDC dc_;
+    RECT bounds_;
+    float scale_;
+    bool modern_ = false, failed_ = false, finished_ = false;
+};
+
 void drawGearIcon(ID2D1HwndRenderTarget* target, ID2D1Factory* factory,
                   ID2D1Brush* foreground, ID2D1Brush* background, D2D1_POINT_2F center) {
     ID2D1PathGeometry* geometry = nullptr;
@@ -245,6 +365,12 @@ App::App(HINSTANCE instance) : instance_(instance) {
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"zh-cn", &compactFormat_);
         writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f, L"zh-cn", &capacityFormat_);
+        writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 17.0f, L"zh-cn", &settingsTitleFormat_);
+        writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"zh-cn", &settingsLabelFormat_);
+        writeFactory_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-cn", &settingsButtonFormat_);
         if (capacityFormat_) {
             capacityFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             capacityFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -263,6 +389,8 @@ App::~App() {
     if (transferThread_.joinable()) transferThread_.join();
     if (monitorThread_.joinable()) monitorThread_.join();
     discardGraphics();
+    release(settingsRenderTarget_);
+    release(settingsTitleFormat_); release(settingsLabelFormat_); release(settingsButtonFormat_);
     release(titleFormat_); release(metricFormat_); release(labelFormat_); release(compactFormat_); release(capacityFormat_);
     release(writeFactory_); release(d2dFactory_);
     if (uiFont_) DeleteObject(uiFont_);
@@ -1163,7 +1291,7 @@ void App::rebuildSettingsFonts(UINT dpi) {
     uiFont_ = makeFont(13, FW_NORMAL);
     settingsTitleFont_ = makeFont(17, FW_SEMIBOLD);
     settingsLabelFont_ = makeFont(12, FW_NORMAL);
-    settingsButtonFont_ = makeFont(13, FW_SEMIBOLD);
+    settingsButtonFont_ = makeFont(13, FW_NORMAL);
 
     if (settingsWindow_) {
         constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey, RefreshIntervalEdit};
@@ -1254,66 +1382,60 @@ void App::paintSettings(HDC destination) {
     auto p = [dpi](int v) { return pixels(v, dpi); };
     const auto bg = settingsColor(background_), fg = settingsColor(foreground_);
     const auto line = blendColor(bg, fg, 0.14f), muted = blendColor(bg, fg, 0.62f);
-    HBRUSH surface = CreateSolidBrush(bg);
-    HBRUSH fieldBrush = CreateSolidBrush(blendColor(bg, fg, 0.035f));
-    FillRect(buffer, &client, surface);
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, p(1)), line);
-    HGDIOBJ oldPen = SelectObject(buffer, pen);
-    HGDIOBJ oldBrush = SelectObject(buffer, surface);
-    RoundRect(buffer, 0, 0, client.right, client.bottom, p(24), p(24));
-    SetBkMode(buffer, TRANSPARENT);
-    HGDIOBJ oldFont = SelectObject(buffer, settingsTitleFont_);
-    auto text = [&](const std::wstring& value, int x, int y, int w, int h, COLORREF color) {
-        SetTextColor(buffer, color);
-        RECT rect{p(x), p(y), p(x + w), p(y + h)};
-        DrawTextW(buffer, value.c_str(), -1, &rect,
-            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
-    };
-    text(local_ ? L"本机监控设置" : L"服务器设置", 24, 14, 370, 26, fg);
-    SelectObject(buffer, settingsLabelFont_);
-    text(wide(windowTitle()), 24, 42, 392, 20, muted);
-    RECT close{p(430), p(16), p(456), p(44)};
-    SetTextColor(buffer, muted);
-    DrawTextW(buffer, L"×", -1, &close, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-    SelectObject(buffer, fieldBrush);
-    auto field = [&](int x, int y, int w, int h = 34) {
-        RoundRect(buffer, p(x), p(y), p(x + w), p(y + h), p(12), p(12));
-    };
-    if (settingsTab_ == 0 && local_) {
-        text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
-        text(L"当前 Windows 主机 · 自动监控", 30, 216, 420, 28, fg);
-        text(L"无需填写 SSH 地址、账号或密码", 30, 256, 420, 24, muted);
-        text(L"温度与功耗取决于硬件和传感器支持", 30, 292, 420, 24, muted);
-        text(L"显示“CPU温区”时，数值来自 Windows 温区", 30, 328, 420, 24, muted);
-    } else if (settingsTab_ == 0) {
-        text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
-        text(L"主机地址", 30, 202, 290, 20, muted); field(30, 225, 298);
-        text(L"端口", 346, 202, 100, 20, muted); field(346, 225, 104);
-        text(L"用户名", 30, 272, 190, 20, muted); field(30, 295, 192);
-        text(L"密码 / 密钥口令", 254, 272, 196, 20, muted); field(254, 295, 196);
-        text(L"私钥路径 · 可选", 30, 342, 420, 20, muted); field(30, 365, 420);
-    } else if (settingsTab_ == 1) {
-        text(L"本机文件夹", 30, 132, 420, 20, muted); field(30, 155, 250);
-        text(L"服务器文件夹", 30, 212, 420, 20, muted); field(30, 235, 420);
-        text(L"传输范围", 30, 284, 420, 20, muted);
-        text(L"上传：本机 → 服务器", 30, 366, 420, 24, fg);
-        text(L"下载：服务器 → 本机", 30, 394, 420, 24, fg);
-        text(L"支持断点续传，超过 5 个文件时再次确认", 30, 436, 420, 22, muted);
-    } else {
-        text(L"窗口配色", 30, 128, 420, 20, muted);
-        text(L"浮窗、收起状态与设置页使用同一配色", 30, 212, 420, 20, muted);
-        text(L"下一个服务器窗口", 30, 244, 420, 20, muted); field(30, 268, 420, 36);
-        text(L"上一个服务器窗口", 30, 324, 420, 20, muted); field(30, 348, 420, 36);
-        text(L"快捷键至少包含 Ctrl 或 Alt；刷新间隔仅用于当前服务器", 30, 398, 420, 22, muted);
-        text(L"监控刷新间隔（1–3600 秒）", 30, 434, 300, 22, muted); field(338, 428, 112, 36);
+    // Paint a complete buffered frame. GDI is retained only if Direct2D cannot render.
+    for (const bool modern : {true, false}) {
+        SettingsCanvas canvas(d2dFactory_, writeFactory_, settingsRenderTarget_, buffer, client, dpi,
+            modern && settingsTitleFormat_ && settingsLabelFormat_);
+        canvas.clear(bg);
+        canvas.rounded(client, p(24), bg, line, std::max(1, p(1)));
+        auto* format = settingsTitleFormat_;
+        HFONT fallback = settingsTitleFont_;
+        auto text = [&](const std::wstring& value, int x, int y, int w, int h, COLORREF color) {
+            const RECT rect{p(x), p(y), p(x + w), p(y + h)};
+            canvas.text(value, rect, format, fallback, color);
+        };
+        text(local_ ? L"本机监控设置" : L"服务器设置", 24, 14, 370, 26, fg);
+        format = settingsLabelFormat_; fallback = settingsLabelFont_;
+        text(wide(windowTitle()), 24, 42, 392, 20, muted);
+        canvas.text(L"×", RECT{p(430), p(16), p(456), p(44)}, format, fallback, muted,
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+        auto field = [&](int x, int y, int w, int h = 34) {
+            canvas.rounded(RECT{p(x), p(y), p(x + w), p(y + h)}, p(12),
+                blendColor(bg, fg, 0.035f), line, std::max(1, p(1)));
+        };
+        if (settingsTab_ == 0 && local_) {
+            text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
+            text(L"当前 Windows 主机 · 自动监控", 30, 216, 420, 28, fg);
+            text(L"无需填写 SSH 地址、账号或密码", 30, 256, 420, 24, muted);
+            text(L"温度与功耗取决于硬件和传感器支持", 30, 292, 420, 24, muted);
+            text(L"显示“CPU温区”时，数值来自 Windows 温区", 30, 328, 420, 24, muted);
+        } else if (settingsTab_ == 0) {
+            text(L"显示名称", 30, 132, 408, 20, muted); field(30, 155, 420);
+            text(L"主机地址", 30, 202, 290, 20, muted); field(30, 225, 298);
+            text(L"端口", 346, 202, 100, 20, muted); field(346, 225, 104);
+            text(L"用户名", 30, 272, 190, 20, muted); field(30, 295, 192);
+            text(L"密码 / 密钥口令", 254, 272, 196, 20, muted); field(254, 295, 196);
+            text(L"私钥路径 · 可选", 30, 342, 420, 20, muted); field(30, 365, 420);
+        } else if (settingsTab_ == 1) {
+            text(L"本机文件夹", 30, 132, 420, 20, muted); field(30, 155, 250);
+            text(L"服务器文件夹", 30, 212, 420, 20, muted); field(30, 235, 420);
+            text(L"传输范围", 30, 284, 420, 20, muted);
+            text(L"上传：本机 → 服务器", 30, 366, 420, 24, fg);
+            text(L"下载：服务器 → 本机", 30, 394, 420, 24, fg);
+            text(L"支持断点续传，超过 5 个文件时再次确认", 30, 436, 420, 22, muted);
+        } else {
+            text(L"窗口配色", 30, 128, 420, 20, muted);
+            text(L"浮窗、收起状态与设置页使用同一配色", 30, 212, 420, 20, muted);
+            text(L"下一个服务器窗口", 30, 244, 420, 20, muted); field(30, 268, 420, 36);
+            text(L"上一个服务器窗口", 30, 324, 420, 20, muted); field(30, 348, 420, 36);
+            text(L"快捷键至少包含 Ctrl 或 Alt；刷新间隔仅用于当前服务器", 30, 398, 420, 22, muted);
+            text(L"监控刷新间隔（1–3600 秒）", 30, 434, 300, 22, muted); field(338, 428, 112, 36);
+        }
+        canvas.line(p(24), p(480), p(456), p(480), line, std::max(1, p(1)));
+        if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" :
+            (local_ ? L"本机监控无需 SSH 连接" : L"连接信息仅用于当前服务器"), 24, 500, 264, 26, muted);
+        if (canvas.finish()) break;
     }
-    MoveToEx(buffer, p(24), p(480), nullptr); LineTo(buffer, p(456), p(480));
-    if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" :
-        (local_ ? L"本机监控无需 SSH 连接" : L"连接信息仅用于当前服务器"), 24, 500, 264, 26, muted);
-    SelectObject(buffer, oldFont);
-    SelectObject(buffer, oldBrush);
-    SelectObject(buffer, oldPen);
-    DeleteObject(pen); DeleteObject(surface); DeleteObject(fieldBrush);
     BitBlt(target, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
     SelectObject(buffer, oldBitmap); DeleteObject(bitmap); DeleteDC(buffer);
     if (!destination) EndPaint(settingsWindow_, &paint);
@@ -1337,28 +1459,25 @@ void App::drawSettingsButton(const DRAWITEMSTRUCT& item) {
     if (item.CtlID == DeleteServer) color = RGB(218, 76, 76);
     if (pressed) fill = blendColor(fill, fg, 0.10f);
     if (disabled) { fill = bg; color = blendColor(bg, fg, 0.35f); }
-    SetDCBrushColor(item.hDC, bg);
-    FillRect(item.hDC, &item.rcItem, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, std::max(1, p(focused ? 2 : 1)), border);
-    auto oldBrush = SelectObject(item.hDC, brush), oldPen = SelectObject(item.hDC, pen);
-    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, p(12), p(12));
-    SetBkMode(item.hDC, TRANSPARENT); SetTextColor(item.hDC, color);
-    auto oldFont = SelectObject(item.hDC, settingsButtonFont_);
     wchar_t text[64]{};
     GetWindowTextW(item.hwndItem, text, 64);
-    RECT textRect = item.rcItem;
-    if (item.CtlID == BackgroundColor || item.CtlID == ForegroundColor) {
-        HBRUSH swatch = CreateSolidBrush(item.CtlID == BackgroundColor ? bg : fg);
-        SelectObject(item.hDC, swatch);
-        Ellipse(item.hDC, p(16), p(14), p(34), p(32));
-        SelectObject(item.hDC, brush); DeleteObject(swatch);
-        textRect.left += p(26);
+    for (const bool modern : {true, false}) {
+        SettingsCanvas canvas(d2dFactory_, writeFactory_, settingsRenderTarget_, item.hDC, item.rcItem,
+            settingsLayoutDpi_, modern && settingsButtonFormat_);
+        canvas.clear(bg);
+        canvas.rounded(item.rcItem, p(12), fill, border, std::max(1, p(focused ? 2 : 1)));
+        RECT textRect = item.rcItem;
+        if (item.CtlID == BackgroundColor || item.CtlID == ForegroundColor) {
+            canvas.ellipse(RECT{item.rcItem.left + p(16), item.rcItem.top + p(14),
+                item.rcItem.left + p(34), item.rcItem.top + p(32)},
+                item.CtlID == BackgroundColor ? bg : fg, border, std::max(1, p(1)));
+            textRect.left += p(26);
+        }
+        if (pressed) OffsetRect(&textRect, 0, p(1));
+        canvas.text(text, textRect, settingsButtonFormat_, settingsButtonFont_, color,
+            DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (canvas.finish()) break;
     }
-    if (pressed) OffsetRect(&textRect, 0, p(1));
-    DrawTextW(item.hDC, text, -1, &textRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
-    SelectObject(item.hDC, oldFont); SelectObject(item.hDC, oldPen); SelectObject(item.hDC, oldBrush);
-    DeleteObject(pen); DeleteObject(brush);
 }
 
 void App::createSettingsWindow() {

@@ -172,6 +172,7 @@ private:
     ID2D1Factory* d2dFactory_ = nullptr;
     IDWriteFactory* writeFactory_ = nullptr;
     ID2D1HwndRenderTarget* renderTarget_ = nullptr;
+    ID2D1DCRenderTarget* settingsRenderTarget_ = nullptr;
     ID2D1SolidColorBrush* textBrush_ = nullptr;
     ID2D1SolidColorBrush* mutedBrush_ = nullptr;
     ID2D1SolidColorBrush* accentBrush_ = nullptr;
@@ -185,6 +186,9 @@ private:
     IDWriteTextFormat* labelFormat_ = nullptr;
     IDWriteTextFormat* compactFormat_ = nullptr;
     IDWriteTextFormat* capacityFormat_ = nullptr;
+    IDWriteTextFormat* settingsTitleFormat_ = nullptr;
+    IDWriteTextFormat* settingsLabelFormat_ = nullptr;
+    IDWriteTextFormat* settingsButtonFormat_ = nullptr;
 
     TelemetrySnapshot snapshot_;
     TransferProgress transfer_;

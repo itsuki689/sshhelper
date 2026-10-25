@@ -36,10 +36,10 @@ std::filesystem::path knownHostsPath() {
     return std::filesystem::current_path() / L"AirSFTP.known_hosts";
 }
 
-bool verifyOrRememberHost(const ConnectionConfig& config, const std::string& fingerprint, std::string& error) {
+bool verifyOrRememberHost(const ConnectionConfig& config, const std::string& fingerprint,
+                         const std::filesystem::path& path, bool trustNewHosts, std::string& error) {
     static std::mutex knownHostsMutex;
     std::lock_guard lock(knownHostsMutex);
-    const auto path = knownHostsPath();
     const std::string key = config.host + ":" + std::to_string(config.port) + " ";
     std::ifstream input(path);
     std::string line;
@@ -51,6 +51,10 @@ bool verifyOrRememberHost(const ConnectionConfig& config, const std::string& fin
         return false;
     }
     input.close();
+    if (!trustNewHosts) {
+        error = "SSH host key is not pinned. Connect once in AirSFTP before using sshhelper-tool.";
+        return false;
+    }
     std::ofstream output(path, std::ios::app);
     if (!output) {
         error = "Cannot write portable host key store: " + path.string();
@@ -84,8 +88,11 @@ bool authenticate(LIBSSH2_SESSION* session, const ConnectionConfig& config, std:
 }
 }
 
-SshSession::SshSession(std::stop_token stop, long timeoutMs)
-    : stop_(stop), timeoutMs_(std::max(1L, timeoutMs)) {}
+SshSession::SshSession(std::stop_token stop, long timeoutMs,
+                     std::filesystem::path hostKeyStore, bool trustNewHosts)
+    : stop_(stop), timeoutMs_(std::max(1L, timeoutMs)),
+      hostKeyStore_(hostKeyStore.empty() ? knownHostsPath() : std::move(hostKeyStore)),
+      trustNewHosts_(trustNewHosts) {}
 
 SshSession::~SshSession() { disconnect(); }
 
@@ -214,7 +221,8 @@ bool SshSession::connect(const ConnectionConfig& config, std::string& error) {
         }
         fingerprint_ = stream.str();
     }
-    if (stop_.stop_requested() || fingerprint_.empty() || !verifyOrRememberHost(config, fingerprint_, error)) {
+    if (stop_.stop_requested() || fingerprint_.empty() ||
+        !verifyOrRememberHost(config, fingerprint_, hostKeyStore_, trustNewHosts_, error)) {
         if (stop_.stop_requested()) error = "Connection cancelled";
         disconnect();
         return false;
