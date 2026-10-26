@@ -47,6 +47,12 @@ jobs:
           mkdir -p build/logs
           { gcc --version; cmake --version; ninja --version; node --version; } 2>&1 | tee build/logs/toolchain.log
 
+      - name: Verify checked-in portable distribution
+        shell: powershell
+        run: |
+          & ./scripts/verify-dist.ps1
+          & ./tests/distribution_test.ps1
+
       - name: Configure
         run: |
           set -euo pipefail

@@ -9,3 +9,5 @@ AirSFTP.credentials
 dist/*
 !dist/AirSFTP.exe
 !dist/sshhelper-tool.exe
+!dist/build-info.json
+!dist/SHA256SUMS

@@ -1,0 +1,57 @@
+{
+    "schema_version":  1,
+    "source_commit":  "9d7262f8b811add693db425793fc960984d33f30",
+    "source_url":  "https://github.com/itsuki689/sshhelper/commit/9d7262f8b811add693db425793fc960984d33f30",
+    "ci":  {
+               "repository":  "itsuki689/sshhelper",
+               "run_id":  40277892828,
+               "run_attempt":  1,
+               "run_url":  "https://github.com/itsuki689/sshhelper/actions/runs/40277892828",
+               "head_sha":  "9d7262f8b811add693db425793fc960984d33f30",
+               "conclusion":  "success",
+               "workflow":  ".github/workflows/windows-ci.yml",
+               "artifact_id":  12631160354,
+               "artifact_name":  "windows-mingw-9d7262f8b811add693db425793fc960984d33f30",
+               "artifact_created_at":  "2026-10-26T06:09:37Z",
+               "archive_sha256":  "75b03717e87fb27f163f52d96cf0dd4bd658131c78e13671f0872e289c589a5a"
+           },
+    "toolchain":  {
+                      "compiler":  "gcc.exe (Rev6, Built by MSYS2 project) 16.2.0",
+                      "cmake":  "cmake version 4.4.4",
+                      "ninja":  "1.13.2",
+                      "node":  "v24.22.1"
+                  },
+    "tests":  {
+                  "total":  13,
+                  "failures":  0,
+                  "skipped":  0,
+                  "names":  [
+                                "monitor_api",
+                                "mcp_server",
+                                "mcp_stdio",
+                                "telemetry_parser",
+                                "local_telemetry",
+                                "restart_process",
+                                "credential_store",
+                                "ssh_client",
+                                "host_trust",
+                                "transfer",
+                                "folder_transfer",
+                                "app_windows",
+                                "app_host_trust"
+                            ]
+              },
+    "files":  [
+                  {
+                      "name":  "AirSFTP.exe",
+                      "size_bytes":  4704362,
+                      "sha256":  "3d52ca7a260e916de4ac10b47321c654d0063ff93c0cd18fa7b64cefdd1408a2"
+                  },
+                  {
+                      "name":  "sshhelper-tool.exe",
+                      "size_bytes":  4139935,
+                      "sha256":  "cd91734c41b71018e428b7d844e2873e64813ad2cae8ac0d03e195f81612856d"
+                  }
+              ],
+    "delivery_commit_lookup":  "git log -1 --format=%H -- dist/build-info.json"
+}

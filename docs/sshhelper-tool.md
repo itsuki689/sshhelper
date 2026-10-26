@@ -6,7 +6,7 @@ Windows 本机采样及 DPAPI 配置读取代码。Codex 通过 stdin/stdout 的
 
 ## 安装
 
-运行 `build-exe.bat` 构建并测试。`dist` 下会得到 `AirSFTP.exe` 和 `sshhelper-tool.exe`。
+[下载完整项目 ZIP](https://github.com/itsuki689/sshhelper/archive/refs/heads/master.zip) 并解压，`dist` 中已包含经 Windows CI 验证的两个 EXE；先运行 `powershell -File scripts/verify-dist.ps1` 核验。来源与各文件 SHA256 见 `dist/build-info.json`、`dist/SHA256SUMS`。自行执行 `build-exe.bat` 时，本地编译结果在 `build` 中，不会覆盖已交付的 `dist`。
 先在 AirSFTP 保存 SSH 配置，通过可信渠道核对首次确认窗口中的主机、端口和 SHA256 指纹，明确接受并成功保存后再连接。
 
 在项目根目录运行：

@@ -27,7 +27,7 @@
 
 ## 直接使用
 
-1. 双击 `start.bat`，或直接运行 `dist\\AirSFTP.exe`。已有配置时先进入托盘后台连接，成功后显示窗口；首次使用自动打开设置页。
+1. [下载完整项目 ZIP](https://github.com/itsuki689/sshhelper/archive/refs/heads/master.zip)，解压后双击根目录的 `start.bat`。无需安装编译器；脚本先核验交付文件，再启动同目录的 `dist/AirSFTP.exe`。已有配置时先进入托盘后台连接，成功后显示窗口；首次使用自动打开设置页。
 2. 点“设置”，填写主机、端口、用户名以及密码或私钥路径；加密私钥可在密码框填写口令。
 3. 点“连接并监控”保存配置。首次连接先核对并接受主机指纹，连接成功后开始每 2 秒采样。点击“新增服务器”打开新窗口，在新窗口填写另一台服务器；旧版单服务器配置会自动读入。
 4. 填写两个**文件夹路径**，例如本地 `D:\data`、远程 `/home/user/backup`。本地“浏览”按钮打开文件夹选择器；下载目标文件夹也可以手动输入尚未创建的完整路径。
@@ -84,6 +84,33 @@ RAM、SSD 卡片容量保留一位小数，使用更大的 16 DIP 半粗字体�
 
 实现与测试入口：`src/host_trust.*`（尝试、协调、持久化）、`src/host_trust_ui.*`（非模态 Win32 窗口）、`src/ssh_client.*`（认证前门禁）、`tests/host_trust_test.cpp` 和 `tests/app_host_trust_test.cpp`。大规模 UI 拆分与正式发行流程留待后续任务。
 
+## 便携交付来源与校验
+
+项目 ZIP 中的 `dist` 只跟踪两个 EXE、`build-info.json` 和 `SHA256SUMS`，不包含账号、主机信任记录或历史备份。运行后生成的个人配置继续保存在 EXE 同目录。请完整解压项目，保留根目录的 `start.bat` 和 `scripts/verify-dist.ps1`；启动器会在任一文件缺失或校验不一致时退出，不会静默运行旧程序或自动编译。
+
+[build-info.json](dist/build-info.json) 中的 `source_commit` 是两个 EXE 的**构建源码提交**，`ci` 记录该提交对应的成功 Windows CI、运行尝试和工件 ID，`toolchain` 来自该工件的工具链日志，`files` 是分别针对解压后的两个 EXE 计算的 SHA256。`ci.archive_sha256` 单独表示 ZIP 摘要，不能拿来核验 EXE。首次信任回归 `host_trust`、`app_host_trust` 及 MCP stdio 的结果可沿这些记录追溯。
+
+**交付提交**是随后更新二进制及说明的 Git 提交，通常晚于构建源码提交；有 Git 时执行 `git log -1 --format=%H -- dist/build-info.json` 查看，下载 ZIP 时可在 GitHub 的该文件历史中查看。构建说明不引用尚不存在的自身交付提交，也不以程序的产品版本字符串代替源码提交。
+
+在项目根目录核验：
+
+```powershell
+powershell -NoProfile -File scripts/verify-dist.ps1
+Get-FileHash dist/AirSFTP.exe, dist/sshhelper-tool.exe -Algorithm SHA256
+```
+
+第一条命令同时检查构建说明、`SHA256SUMS` 和两个实际文件；也可在 `dist` 下使用 `sha256sum -c SHA256SUMS`。编译/CTest 通过与便携启动是两个验证阶段：`powershell -NoProfile -File scripts/test-portable.ps1` 会在含中文和空格的独立临时目录复制这四个文件及启动脚本，用仅包含 Windows 系统目录的 PATH 运行 `start.bat` 和 MCP 初始化，记录加载的模块及隔离配置检查，报告保存在 `build/portable-smoke.json`；会保留临时目录供检查。
+
+维护者更新时，从选定的成功 CI 页面下载完整工件 ZIP，再执行：
+
+```powershell
+powershell -NoProfile -File scripts/update-dist.ps1 -RunId 40277892828 -ArtifactId 12631160354 -ArchivePath "C:\Downloads\windows-mingw.zip"
+```
+
+脚本自动核对 CI 的 `head_sha`、成功状态、工件所属运行、ZIP 摘要及完整 CTest 报告，再计算 EXE 摘要并生成两份说明。网络访问 GitHub API 受限时，可设置已有的 `GH_TOKEN` / `GITHUB_TOKEN`，或通过 `-RunMetadataPath` 和 `-ArtifactMetadataPath` 提供从可信 GitHub 客户端保存的对应 API JSON 响应；校验规则相同。旧文件会备份到交付目录外的 `build/dist-backups`，替换失败时恢复；个人配置不动。已运行的 MCP 进程仍使用原映像，更新后应重启客户端的 MCP 会话以加载新文件。代码签名与完整 Release 系统留待独立任务。
+
+本批交付的已执行检查及未完成的交互冒烟见 [便携交付验收记录](docs/portable-delivery.md)。
+
 ## 一键构建便携 EXE
 
 开发机需要 CMake 3.24+、Ninja 和 MinGW-w64 GCC。双击：
@@ -92,7 +119,7 @@ RAM、SSD 卡片容量保留一位小数，使用更大的 16 DIP 半粗字体�
 build-exe.bat
 ```
 
-脚本会下载锁定版本的 libssh2，静态链接 WinCNG、C/C++ 运行库，执行测试，并输出 `dist\\AirSFTP.exe`。最终程序仅依赖 Windows 系统 DLL。
+脚本会下载锁定版本的 libssh2，静态链接 WinCNG、C/C++ 运行库并执行测试。本地编译结果是 `build/AirSFTP.exe` 和 `build/sshhelper-tool.exe`，可直接运行；不会覆盖带 CI 来源和校验信息的 `dist`。更新正式跟踪的便携文件请使用上面的 CI 工件导入流程。最终程序仅依赖 Windows 系统运行库。
 
 命令行等价操作：
 

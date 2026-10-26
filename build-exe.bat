@@ -13,13 +13,9 @@ if errorlevel 1 goto :failed
 ctest --test-dir build --output-on-failure
 if errorlevel 1 goto :failed
 
-if not exist dist mkdir dist
-copy /B /Y "build\AirSFTP.exe" "dist\AirSFTP.exe" >nul
-if errorlevel 1 goto :failed
-copy /B /Y "build\sshhelper-tool.exe" "dist\sshhelper-tool.exe" >nul
-if errorlevel 1 goto :failed
-for %%I in ("dist\AirSFTP.exe") do echo Portable EXE ready: %%~fI  [%%~zI bytes]
-for %%I in ("dist\sshhelper-tool.exe") do echo Codex MCP tool ready: %%~fI  [%%~zI bytes]
+for %%I in ("build\AirSFTP.exe") do echo Local portable EXE ready: %%~fI  [%%~zI bytes]
+for %%I in ("build\sshhelper-tool.exe") do echo Local MCP tool ready: %%~fI  [%%~zI bytes]
+echo To update the tracked dist from successful CI, use scripts\update-dist.ps1.
 exit /b 0
 
 :failed

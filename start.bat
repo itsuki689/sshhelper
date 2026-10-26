@@ -1,8 +1,9 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist "dist\AirSFTP.exe" (
-  call build-exe.bat
-  if errorlevel 1 exit /b 1
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\verify-dist.ps1"
+if errorlevel 1 (
+  echo Distribution verification failed. Download and extract the complete project ZIP again.
+  exit /b 1
 )
-start "" "dist\AirSFTP.exe"
+start "" "%~dp0dist\AirSFTP.exe"
