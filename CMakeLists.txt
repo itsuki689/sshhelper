@@ -18,7 +18,7 @@ set(ENABLE_UNICODE ON CACHE BOOL "Use wide Windows APIs in libssh2" FORCE)
 FetchContent_Declare(
   libssh2
   URL https://codeload.github.com/libssh2/libssh2/zip/250045f77ad9c906f65d9071d134bf9f8f9652db
-  URL_HASH SHA256=d8af35ecba6958bc2293951c448a58f4913c03d6614d5f37c1cc923c03108d43
+  URL_HASH SHA256=9c6b225bc20ec93497edd4b95cdc12418a31de7b2150ec49a7173628f2a14a99
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(libssh2)
