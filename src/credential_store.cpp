@@ -78,7 +78,7 @@ bool saveConnectionCredentials(const std::filesystem::path& path,
     DATA_BLOB input{static_cast<DWORD>(plain.size()), plain.data()};
     DATA_BLOB output{};
     DATA_BLOB entropy = entropyBlob();
-    if (!CryptProtectData(&input, L"AirSFTP SSH credentials", &entropy, nullptr, nullptr,
+    if (!CryptProtectData(&input, L"sshhelper SSH credentials", &entropy, nullptr, nullptr,
                           CRYPTPROTECT_UI_FORBIDDEN, &output)) {
         error = windowsError("Cannot encrypt saved SSH credentials");
         clearBytes(plain);
@@ -174,9 +174,7 @@ bool saveServerSettings(const std::filesystem::path& path,
     if (settings.servers.size() > 65 || localCount > 1 || settings.servers.size() - localCount > 64) {
         error = "Maximum 64 SSH servers and one local host"; return false;
     }
-    appendU32(plain, 4);
-    appendU32(plain, settings.nextHotkey);
-    appendU32(plain, settings.previousHotkey);
+    appendU32(plain, 5);
     appendU32(plain, static_cast<std::uint32_t>(settings.servers.size()));
     for (const auto& profile : settings.servers) {
         const auto& config = profile.connection;
@@ -200,7 +198,7 @@ bool saveServerSettings(const std::filesystem::path& path,
     DATA_BLOB input{static_cast<DWORD>(plain.size()), plain.data()};
     DATA_BLOB output{};
     DATA_BLOB entropy = entropyBlob();
-    if (!CryptProtectData(&input, L"AirSFTP SSH credentials", &entropy, nullptr, nullptr,
+    if (!CryptProtectData(&input, L"sshhelper SSH credentials", &entropy, nullptr, nullptr,
                           CRYPTPROTECT_UI_FORBIDDEN, &output)) {
         error = windowsError("Cannot encrypt saved SSH credentials");
         clearBytes(plain);
@@ -282,10 +280,13 @@ bool loadServerSettings(const std::filesystem::path& path,
         settings = std::move(loaded);
         return true;
     }
-    valid = valid && (version == 2 || version == 3 || version == 4) &&
-        readU32(output.pbData, output.cbData, offset, loaded.nextHotkey) &&
-        readU32(output.pbData, output.cbData, offset, loaded.previousHotkey) &&
-        readU32(output.pbData, output.cbData, offset, count) && count <= 65;
+    std::uint32_t obsoleteHotkey = 0;
+    valid = valid && version >= 2 && version <= 5;
+    if (valid && version < 5) {
+        valid = readU32(output.pbData, output.cbData, offset, obsoleteHotkey) &&
+            readU32(output.pbData, output.cbData, offset, obsoleteHotkey);
+    }
+    valid = valid && readU32(output.pbData, output.cbData, offset, count) && count <= 65;
     for (std::uint32_t i = 0; valid && i < count; ++i) {
         ServerProfile profile;
         auto& config = profile.connection;

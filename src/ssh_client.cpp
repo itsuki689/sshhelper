@@ -206,7 +206,7 @@ bool SshSession::connect(const ConnectionConfig& supplied, std::string& error) {
     if (status == HostKeyStatus::Changed || status == HostKeyStatus::Error) return failTrust();
     if (status == HostKeyStatus::Unknown) {
         if (!confirmHost_) {
-            error = "SSH host key is not pinned. Explicitly verify and accept it in AirSFTP before using sshhelper-tool.";
+            error = "SSH host key is not pinned. Explicitly verify and accept it in sshhelper before using sshhelper-tool.";
             return failTrust();
         }
         const auto answer = confirmHost_(key, attempt);

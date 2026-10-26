@@ -4,7 +4,7 @@
 #include <algorithm>
 
 namespace {
-constexpr wchar_t TrayClass[] = L"AirSFTPTrayWindow";
+constexpr wchar_t TrayClass[] = L"sshhelperTrayWindow";
 constexpr UINT TrayMessage = WM_APP + 10;
 constexpr UINT_PTR RetryTrayTimer = 1;
 constexpr UINT ShowConnected = 100, HideAll = 101, AddServer = 102, ExitApp = 103, LocalHost = 104, RestartApp = 105, ServerBase = 1000;
@@ -24,7 +24,7 @@ bool App::createTray() {
     cls.lpszClassName = TrayClass;
     if (!RegisterClassExW(&cls) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
     // A hidden top-level window receives Explorer's TaskbarCreated broadcast.
-    trayWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, TrayClass, L"AirSFTP",
+    trayWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, TrayClass, L"sshhelper",
         WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, this);
     if (!trayWindow_) return false;
     return addTrayIcon();
@@ -37,8 +37,8 @@ bool App::addTrayIcon() {
     icon.uID = 1;
     icon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     icon.uCallbackMessage = TrayMessage;
-    icon.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_AIRSFTP));
-    lstrcpynW(icon.szTip, L"AirSFTP · 双击显示已连接服务器", ARRAYSIZE(icon.szTip));
+    icon.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_SSHHELPER));
+    lstrcpynW(icon.szTip, L"sshhelper · 双击显示已连接服务器", ARRAYSIZE(icon.szTip));
     trayAdded_ = Shell_NotifyIconW(NIM_ADD, &icon) != FALSE;
     if (trayAdded_) KillTimer(trayWindow_, RetryTrayTimer);
     else SetTimer(trayWindow_, RetryTrayTimer, 5000, nullptr);
@@ -189,18 +189,18 @@ void App::restartApplication() {
     if (std::any_of(all.begin(), all.end(), [](App* app) { return app->transfer_.active; }) &&
         MessageBoxW(trayWindow_ ? trayWindow_ : window_,
             L"当前有文件正在传输。重启将安全停止传输，未完成内容保留为临时文件。\n\n是否继续重启软件？",
-            L"AirSFTP 重启", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+            L"sshhelper 重启", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
     auto executable = restart_process::executablePath();
     // Publishing a new build may have renamed the still-running old executable.
-    if (executable.filename().wstring().starts_with(L"AirSFTP.previous-")) {
-        const auto current = executable.parent_path() / L"AirSFTP.exe";
+    if (executable.filename().wstring().starts_with(L"sshhelper.previous-")) {
+        const auto current = executable.parent_path() / L"sshhelper.exe";
         std::error_code error;
         if (std::filesystem::is_regular_file(current, error)) executable = current;
     }
     std::wstring error;
     if (!restart_process::launchAfterExit(executable, error)) {
         MessageBoxW(trayWindow_ ? trayWindow_ : window_, (error + L"\n当前程序继续运行。").c_str(),
-            L"AirSFTP 重启失败", MB_OK | MB_ICONWARNING);
+            L"sshhelper 重启失败", MB_OK | MB_ICONWARNING);
         return;
     }
     quitApplication();

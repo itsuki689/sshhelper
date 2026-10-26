@@ -26,8 +26,8 @@
 #include <vector>
 
 namespace {
-constexpr wchar_t MainClass[] = L"AirSFTPFloatingWindow";
-constexpr wchar_t SettingsClass[] = L"AirSFTPSettingsWindow";
+constexpr wchar_t MainClass[] = L"sshhelperFloatingWindow";
+constexpr wchar_t SettingsClass[] = L"sshhelperSettingsWindow";
 constexpr UINT SnapshotMessage = WM_APP + 1;
 constexpr UINT TransferMessage = WM_APP + 2;
 constexpr UINT ConfirmTransferMessage = WM_APP + 3;
@@ -422,9 +422,6 @@ int App::run(int showCommand) {
         child->createMainWindow(SW_HIDE);
         children_.push_back(std::move(child));
     }
-    nextHotkey_ = saved.nextHotkey;
-    previousHotkey_ = saved.previousHotkey;
-    setHotkeys(saved.nextHotkey, saved.previousHotkey, true);
     for (auto* server : servers())
         if (server->window_ && (server->local_ || !server->config_.host.empty())) server->startMonitor(server->config_);
     if (!local_ && config_.host.empty()) showSettings();
@@ -434,10 +431,6 @@ int App::run(int showCommand) {
     }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (message.message == WM_HOTKEY && !message.hwnd) {
-            switchServer(message.wParam == 2);
-            continue;
-        }
         bool handled = hostTrustUi_ && hostTrustUi_->translate(message);
         if (handled) continue;
         for (auto* server : servers()) {
@@ -446,8 +439,6 @@ int App::run(int showCommand) {
         }
         if (!handled) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
-    UnregisterHotKey(nullptr, 1);
-    UnregisterHotKey(nullptr, 2);
     for (auto* server : servers()) {
         server->stopMonitor();
         server->stopTransfer();
@@ -462,8 +453,8 @@ bool App::registerClasses() {
     mainClass.lpfnWndProc = mainWindowProc;
     mainClass.hInstance = instance_;
     mainClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    mainClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_AIRSFTP));
-    mainClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_AIRSFTP),
+    mainClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_SSHHELPER));
+    mainClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(IDI_SSHHELPER),
         IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
     mainClass.hbrBackground = nullptr;
     mainClass.lpszClassName = MainClass;
@@ -800,7 +791,7 @@ void App::paint() {
         DeleteObject(background);
         SetBkMode(paintDc, TRANSPARENT);
         SetTextColor(paintDc, RGB(foreground_ >> 16, (foreground_ >> 8) & 255, foreground_ & 255));
-        const wchar_t* message = L"AirSFTP graphics initialization failed";
+        const wchar_t* message = L"sshhelper graphics initialization failed";
         TextOutW(paintDc, 18, 18, message, static_cast<int>(wcslen(message)));
         EndPaint(window_, &paint);
         return;
@@ -1297,7 +1288,7 @@ void App::rebuildSettingsFonts(UINT dpi) {
     settingsButtonFont_ = makeFont(13, FW_NORMAL);
 
     if (settingsWindow_) {
-        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey, RefreshIntervalEdit};
+        constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit, LocalEdit, RemoteEdit, ServerName, RefreshIntervalEdit};
         constexpr int buttons[] = {BrowseLocal, SaveConnect, UploadButton, DownloadButton, NewServer, ReopenServers, DeleteServer, BackgroundColor, ForegroundColor, OpenLocalFolder, CancelTransfer, ConnectionTab, TransferTab, AppearanceTab};
         for (int id : edits)
             SendMessageW(GetDlgItem(settingsWindow_, id), WM_SETFONT,
@@ -1341,15 +1332,13 @@ void App::layoutSettings(UINT dpi) {
     move(SelectedFiles, 212, 310, 238, 34);
     move(BackgroundColor, 30, 156, 198, 46);
     move(ForegroundColor, 252, 156, 198, 46);
-    move(NextHotkey, 36, 274, 408, 24);
-    move(PreviousHotkey, 36, 354, 408, 24);
-    move(RefreshIntervalEdit, 344, 434, 100, 22);
+    move(RefreshIntervalEdit, 344, 260, 100, 22);
     move(CancelTransfer, 24, 496, 116, 34);
     move(UploadButton, 234, 496, 104, 34);
     move(DownloadButton, 350, 496, 106, 34);
     move(SaveConnect, 300, 496, 156, 34);
     constexpr int edits[] = {HostEdit, PortEdit, UserEdit, PasswordEdit, KeyEdit,
-        LocalEdit, RemoteEdit, ServerName, NextHotkey, PreviousHotkey, RefreshIntervalEdit};
+        LocalEdit, RemoteEdit, ServerName, RefreshIntervalEdit};
     for (int id : edits) SendDlgItemMessageW(settingsWindow_, id, EM_SETMARGINS,
         EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(p(2), p(2)));
     selectSettingsTab(settingsTab_);
@@ -1367,7 +1356,7 @@ void App::selectSettingsTab(int tab) {
     EnableWindow(GetDlgItem(settingsWindow_, TransferTab), !local_);
     for (int id : {LocalEdit, RemoteEdit, BrowseLocal, OpenLocalFolder, EntireFolder,
         SelectedFiles, UploadButton, DownloadButton, CancelTransfer}) visible(id, settingsTab_ == 1);
-    for (int id : {BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey, RefreshIntervalEdit})
+    for (int id : {BackgroundColor, ForegroundColor, RefreshIntervalEdit})
         visible(id, settingsTab_ == 2);
     visible(SaveConnect, settingsTab_ != 1);
     RedrawWindow(settingsWindow_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
@@ -1429,13 +1418,10 @@ void App::paintSettings(HDC destination) {
         } else {
             text(L"窗口配色", 30, 128, 420, 20, muted);
             text(L"浮窗、收起状态与设置页使用同一配色", 30, 212, 420, 20, muted);
-            text(L"下一个服务器窗口", 30, 244, 420, 20, muted); field(30, 268, 420, 36);
-            text(L"上一个服务器窗口", 30, 324, 420, 20, muted); field(30, 348, 420, 36);
-            text(L"快捷键至少包含 Ctrl 或 Alt；刷新间隔仅用于当前服务器", 30, 398, 420, 22, muted);
-            text(L"监控刷新间隔（1–3600 秒）", 30, 434, 300, 22, muted); field(338, 428, 112, 36);
+            text(L"监控刷新间隔（1–3600 秒）", 30, 260, 300, 22, muted); field(338, 254, 112, 36);
         }
         canvas.line(p(24), p(480), p(456), p(480), line, std::max(1, p(1)));
-        if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"切换快捷键对全部服务器生效" :
+        if (settingsTab_ != 1) text(settingsTab_ == 2 ? L"监控设置仅用于当前服务器" :
             (local_ ? L"本机监控无需 SSH 连接" : L"连接信息仅用于当前服务器"), 24, 500, 264, 26, muted);
         if (canvas.finish()) break;
     }
@@ -1487,7 +1473,7 @@ void App::createSettingsWindow() {
     const UINT dpi = GetDpiForWindow(window_);
     settingsLayoutDpi_ = dpi;
     settingsLoaded_ = false;
-    settingsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, SettingsClass, L"AirSFTP 设置",
+    settingsWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, SettingsClass, L"sshhelper 设置",
         WS_POPUP | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
         pixels(SettingsWidth, dpi), pixels(SettingsHeight, dpi),
         window_, nullptr, instance_, this);
@@ -1533,10 +1519,6 @@ void App::createSettingsWindow() {
     addControl(settingsWindow_, WC_BUTTONW, L"新增服务器", BS_OWNERDRAW, 0, 0, 1, 1, NewServer, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"打开全部窗口", BS_OWNERDRAW, 0, 0, 1, 1, ReopenServers, settingsButtonFont_);
     addControl(settingsWindow_, WC_BUTTONW, L"删除此服务器", BS_OWNERDRAW, 0, 0, 1, 1, DeleteServer, settingsButtonFont_);
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_HOTKEY_CLASS};
-    InitCommonControlsEx(&controls);
-    addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, NextHotkey, uiFont_);
-    addControl(settingsWindow_, HOTKEY_CLASSW, L"", WS_TABSTOP, 0, 0, 1, 1, PreviousHotkey, uiFont_);
     addControl(settingsWindow_, WC_EDITW, L"2", ES_NUMBER | ES_AUTOHSCROLL, 0, 0, 1, 1, RefreshIntervalEdit, uiFont_);
     SendDlgItemMessageW(settingsWindow_, RefreshIntervalEdit, EM_SETLIMITTEXT, 4, 0);
     layoutSettings(dpi);
@@ -1674,8 +1656,6 @@ void App::showSettings() {
     if (!settingsLoaded_) {
         SetDlgItemInt(settingsWindow_, RefreshIntervalEdit, refreshIntervalSeconds_.load(), FALSE);
         SetWindowTextW(GetDlgItem(settingsWindow_, ServerName), wide(serverName_).c_str());
-        SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_SETHOTKEY, root_->nextHotkey_, 0);
-        SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_SETHOTKEY, root_->previousHotkey_, 0);
         SetWindowTextW(GetDlgItem(settingsWindow_, HostEdit), wide(config_.host).c_str());
         SetWindowTextW(GetDlgItem(settingsWindow_, PortEdit), std::to_wstring(config_.port).c_str());
         SetWindowTextW(GetDlgItem(settingsWindow_, UserEdit), wide(config_.username).c_str());
@@ -1803,7 +1783,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
         case DeleteServer: {
             if (local_) return 0;
             if (MessageBoxW(settingsWindow_, L"删除此服务器的已保存配置并关闭窗口？",
-                L"AirSFTP", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+                L"sshhelper", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
             stopMonitor(); stopTransfer(); cancelPendingHostTrust();
             deleted_ = true;
             if (!saveServers()) { deleted_ = false; return 0; }
@@ -1859,7 +1839,7 @@ bool App::readSettings(ConnectionConfig& config, std::string& localPath, std::st
     } catch (...) { config.port = 0; }
     if (config.host.empty() || config.username.empty() || config.port < 1 || config.port > 65535 ||
         (config.password.empty() && config.privateKeyPath.empty())) {
-        MessageBoxW(settingsWindow_, L"请填写主机、端口、用户名，并提供密码或私钥。", L"AirSFTP", MB_OK | MB_ICONWARNING);
+        MessageBoxW(settingsWindow_, L"请填写主机、端口、用户名，并提供密码或私钥。", L"sshhelper", MB_OK | MB_ICONWARNING);
         return false;
     }
     return true;
@@ -1877,7 +1857,7 @@ bool App::readRefreshInterval(std::uint32_t& seconds) const {
 bool App::rememberConnection(const ConnectionConfig& config, const std::string& local, const std::string& remote) {
     std::uint32_t interval = 2;
     if (!readRefreshInterval(interval)) {
-        MessageBoxW(settingsWindow_, L"监控刷新间隔请输入 1–3600 的整数，单位为秒。", L"AirSFTP", MB_OK | MB_ICONWARNING);
+        MessageBoxW(settingsWindow_, L"监控刷新间隔请输入 1–3600 的整数，单位为秒。", L"sshhelper", MB_OK | MB_ICONWARNING);
         selectSettingsTab(2);
         SetFocus(GetDlgItem(settingsWindow_, RefreshIntervalEdit));
         return false;
@@ -1888,10 +1868,6 @@ bool App::rememberConnection(const ConnectionConfig& config, const std::string& 
         c.password != config.password || c.privateKeyPath != config.privateKeyPath || c.keyPassphrase != config.keyPassphrase) {
         stopMonitor(); stopTransfer(); cancelPendingHostTrust();
     }
-    const auto oldNext = root_->nextHotkey_, oldPrevious = root_->previousHotkey_;
-    const auto next = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_GETHOTKEY, 0, 0));
-    const auto previous = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_GETHOTKEY, 0, 0));
-    if (!setHotkeys(next, previous, true)) return false;
     config_ = config;
     localPath_ = local;
     remotePath_ = remote;
@@ -1900,7 +1876,6 @@ bool App::rememberConnection(const ConnectionConfig& config, const std::string& 
     refreshIntervalSeconds_ = interval;
     if (!saveServers()) {
         applyProfile(old);
-        setHotkeys(oldNext, oldPrevious, false);
         return false;
     }
     if (old.connection.host != config_.host || old.connection.port != config_.port)
@@ -2017,18 +1992,18 @@ void App::stopMonitor() {
 void App::startTransfer(TransferDirection direction) {
     if (local_) return;
     if (transfer_.active) {
-        MessageBoxW(settingsWindow_, L"当前正在传输，请先停止或等待完成。", L"AirSFTP", MB_OK);
+        MessageBoxW(settingsWindow_, L"当前正在传输，请先停止或等待完成。", L"sshhelper", MB_OK);
         return;
     }
     ConnectionConfig config; std::string local, remote;
     if (!readSettings(config, local, remote)) return;
     if (local.empty() || remote.empty()) {
-        MessageBoxW(settingsWindow_, L"请填写本地和远程文件夹路径。", L"AirSFTP", MB_OK | MB_ICONWARNING);
+        MessageBoxW(settingsWindow_, L"请填写本地和远程文件夹路径。", L"sshhelper", MB_OK | MB_ICONWARNING);
         return;
     }
     if (!std::filesystem::u8path(local).is_absolute() || remote.front() != '/') {
         MessageBoxW(settingsWindow_, L"请使用完整文件夹路径，例如 D:\\data 和 /home/user/data。",
-                    L"AirSFTP", MB_OK | MB_ICONWARNING);
+                    L"sshhelper", MB_OK | MB_ICONWARNING);
         return;
     }
     auto confirm = hostTrustConfirmation();

@@ -94,8 +94,6 @@ int main() {
     second.name = "Backup";
     second.refreshIntervalSeconds = 60;
     multiple.servers.push_back(second);
-    multiple.nextHotkey = 0x064A;
-    multiple.previousHotkey = 0x064B;
     CHECK(saveServerSettings(path, multiple, error));
     ServerSettings restored;
     CHECK(loadServerSettings(path, restored, error));
@@ -109,7 +107,6 @@ int main() {
     CHECK(restored.servers[0].foreground == first.foreground);
     CHECK(restored.servers[1].connection.host == second.connection.host);
     CHECK(restored.servers[1].connection.password == second.connection.password);
-    CHECK(restored.nextHotkey == multiple.nextHotkey && restored.previousHotkey == multiple.previousHotkey);
     for (auto interval : {0u, 3601u}) {
         auto invalidInterval = multiple;
         invalidInterval.servers[0].refreshIntervalSeconds = interval;

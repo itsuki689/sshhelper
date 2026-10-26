@@ -80,9 +80,6 @@ struct ServerProfile {
 
 struct ServerSettings {
     std::vector<ServerProfile> servers;
-    // Native hotkey control: low byte virtual key, high byte HOTKEYF_* modifiers.
-    std::uint32_t nextHotkey = 0x064E; // Ctrl+Alt+N
-    std::uint32_t previousHotkey = 0x0650; // Ctrl+Alt+P
 };
 
 enum class TransferDirection { Upload, Download };

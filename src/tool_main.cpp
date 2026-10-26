@@ -22,7 +22,7 @@ int run(int argc, wchar_t** argv) {
                 "Default: MCP JSON-RPC over stdin/stdout. Read-only; uses saved AirSFTP profiles and host-key pins.\n";
             return 0;
         }
-        if (arg == L"--version") { std::cout << "sshhelper-tool 1.0.0\n"; return 0; }
+        if (arg == L"--version") { std::cout << "sshhelper-tool " SSHHELPER_VERSION_STRING "\n"; return 0; }
         if (arg == L"--credentials" && i + 1 < argc) credentials = std::filesystem::absolute(argv[++i]);
         else if (arg == L"--server" && i + 1 < argc) server = utf8(argv[++i]);
         else if (arg == L"--stdio" || arg == L"--snapshot" || arg == L"--list-servers") mode = utf8(arg);

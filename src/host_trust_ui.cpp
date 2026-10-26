@@ -2,8 +2,8 @@
 #include <algorithm>
 
 namespace {
-constexpr wchar_t DispatcherClass[] = L"AirSFTPHostTrustDispatcher";
-constexpr wchar_t DialogClass[] = L"AirSFTPHostTrustDialog";
+constexpr wchar_t DispatcherClass[] = L"sshhelperHostTrustDispatcher";
+constexpr wchar_t DialogClass[] = L"sshhelperHostTrustDialog";
 std::wstring wide(const std::string& text) {
     const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0);
     std::wstring result(size, L'\0');

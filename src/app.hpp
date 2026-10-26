@@ -28,7 +28,7 @@ private:
         HostEdit = 2001, PortEdit, UserEdit, PasswordEdit, KeyEdit,
         LocalEdit, RemoteEdit, BrowseLocal, SaveConnect, UploadButton, DownloadButton,
         EntireFolder, SelectedFiles, ServerName, NewServer, ReopenServers, DeleteServer,
-        BackgroundColor, ForegroundColor, NextHotkey, PreviousHotkey, OpenLocalFolder, CancelTransfer,
+        BackgroundColor, ForegroundColor, OpenLocalFolder, CancelTransfer,
         ConnectionTab, TransferTab, AppearanceTab, RefreshIntervalEdit
     };
     enum class CollapseMode { Expanded, Horizontal, Side };
@@ -105,8 +105,6 @@ private:
     void addServer();
     void showLocalMonitor();
     void reopenServers();
-    void switchServer(bool previous);
-    bool setHotkeys(unsigned next, unsigned previous, bool reportError);
     void chooseTheme(bool background);
     void dropFiles(HDROP drop);
     void uploadDropped(std::vector<std::string> paths);
@@ -134,8 +132,6 @@ private:
     std::string detectedHostName_;
     std::uint32_t background_ = 0xFFFFFF, foreground_ = 0x1D1D1F;
     std::atomic<std::uint32_t> refreshIntervalSeconds_{2};
-    unsigned nextHotkey_ = 0x064E, previousHotkey_ = 0x0650;
-    bool hotkeysRegistered_ = false;
     std::size_t windowSlot_ = 0;
     bool readRefreshInterval(std::uint32_t& seconds) const;
     void waitRefreshInterval(std::stop_token token) const;

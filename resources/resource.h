@@ -1,3 +1,3 @@
 #pragma once
 
-#define IDI_AIRSFTP 101
+#define IDI_SSHHELPER 101

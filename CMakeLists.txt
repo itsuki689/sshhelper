@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AirSFTPMonitor VERSION 2.0.0 LANGUAGES C CXX RC)
+project(sshhelper VERSION 2.1.0 LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +32,7 @@ FetchContent_Declare(json
 )
 FetchContent_MakeAvailable(json)
 
-add_library(airsftp_core STATIC
+add_library(sshhelper_core STATIC
   src/credential_store.cpp
   src/ssh_client.cpp
   src/host_trust.cpp
@@ -42,28 +42,28 @@ add_library(airsftp_core STATIC
   src/local_telemetry.cpp
   src/restart_process.cpp
 )
-target_include_directories(airsftp_core PUBLIC src)
-target_link_libraries(airsftp_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt iphlpapi psapi wbemuuid ole32 oleaut32 advapi32 pdh)
-target_compile_definitions(airsftp_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(sshhelper_core PUBLIC src)
+target_link_libraries(sshhelper_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt iphlpapi psapi wbemuuid ole32 oleaut32 advapi32 pdh)
+target_compile_definitions(sshhelper_core PUBLIC SSHHELPER_VERSION_STRING="${PROJECT_VERSION}" UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
-add_executable(AirSFTP WIN32
+add_executable(sshhelper WIN32
   src/main.cpp
   src/app.cpp
   src/app_servers.cpp
   src/app_tray.cpp
   src/host_trust_ui.cpp
   src/transfer_picker.cpp
-  resources/AirSFTP.rc
+  resources/sshhelper.rc
 )
-target_include_directories(AirSFTP PRIVATE resources)
-target_link_libraries(AirSFTP PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
+target_include_directories(sshhelper PRIVATE resources)
+target_link_libraries(sshhelper PRIVATE sshhelper_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
 
 if(MINGW)
-  target_link_options(AirSFTP PRIVATE -static -static-libgcc -static-libstdc++ -municode)
+  target_link_options(sshhelper PRIVATE -static -static-libgcc -static-libstdc++ -municode)
 endif()
 
 add_library(sshhelper_api STATIC src/monitor_api.cpp src/mcp_server.cpp)
-target_link_libraries(sshhelper_api PUBLIC airsftp_core nlohmann_json::nlohmann_json)
+target_link_libraries(sshhelper_api PUBLIC sshhelper_core nlohmann_json::nlohmann_json)
 add_executable(sshhelper-tool src/tool_main.cpp)
 target_link_libraries(sshhelper-tool PRIVATE sshhelper_api)
 if(MINGW)
@@ -71,13 +71,13 @@ if(MINGW)
 endif()
 
 add_executable(telemetry_parser_test tests/telemetry_parser_test.cpp)
-target_link_libraries(telemetry_parser_test PRIVATE airsftp_core)
+target_link_libraries(telemetry_parser_test PRIVATE sshhelper_core)
 
 add_executable(credential_store_test tests/credential_store_test.cpp)
-target_link_libraries(credential_store_test PRIVATE airsftp_core)
+target_link_libraries(credential_store_test PRIVATE sshhelper_core)
 
 add_executable(ssh_client_test tests/ssh_client_test.cpp)
-target_link_libraries(ssh_client_test PRIVATE airsftp_core)
+target_link_libraries(ssh_client_test PRIVATE sshhelper_core)
 
 enable_testing()
 add_executable(monitor_api_test tests/monitor_api_test.cpp)
@@ -102,11 +102,11 @@ else()
 endif()
 add_test(NAME telemetry_parser COMMAND telemetry_parser_test)
 add_executable(local_telemetry_test tests/local_telemetry_test.cpp)
-target_link_libraries(local_telemetry_test PRIVATE airsftp_core)
+target_link_libraries(local_telemetry_test PRIVATE sshhelper_core)
 add_test(NAME local_telemetry COMMAND local_telemetry_test)
 set_tests_properties(local_telemetry PROPERTIES TIMEOUT 30)
 add_executable(restart_process_test tests/restart_process_test.cpp)
-target_link_libraries(restart_process_test PRIVATE airsftp_core)
+target_link_libraries(restart_process_test PRIVATE sshhelper_core)
 add_test(NAME restart_process COMMAND restart_process_test)
 set_tests_properties(restart_process PROPERTIES TIMEOUT 15)
 add_test(NAME credential_store COMMAND credential_store_test)
@@ -123,7 +123,7 @@ if(MINGW)
   set_tests_properties(host_trust PROPERTIES TIMEOUT 30)
 
   add_executable(transfer_test tests/transfer_test.cpp)
-  target_link_libraries(transfer_test PRIVATE airsftp_core)
+  target_link_libraries(transfer_test PRIVATE sshhelper_core)
   # Isolate the test-only pinned host key from the application.
   set_target_properties(transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/transfer-test")
   foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
@@ -134,7 +134,7 @@ if(MINGW)
   add_test(NAME transfer COMMAND transfer_test)
   set_tests_properties(transfer PROPERTIES TIMEOUT 10)
   add_executable(folder_transfer_test tests/folder_transfer_test.cpp)
-  target_link_libraries(folder_transfer_test PRIVATE airsftp_core)
+  target_link_libraries(folder_transfer_test PRIVATE sshhelper_core)
   set_target_properties(folder_transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/folder-test")
   foreach(api session_handshake hostkey_hash userauth_password_ex sftp_init sftp_shutdown
               sftp_open_ex sftp_fstat_ex sftp_read sftp_write sftp_close_handle sftp_stat_ex
@@ -146,18 +146,18 @@ if(MINGW)
 
 endif()
 
-add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/sshhelper.rc)
 target_include_directories(app_windows_test PRIVATE resources)
-target_link_libraries(app_windows_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
+target_link_libraries(app_windows_test PRIVATE sshhelper_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
 set_target_properties(app_windows_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/window-test")
 add_test(NAME app_windows COMMAND app_windows_test)
 set_tests_properties(app_windows PROPERTIES TIMEOUT 15)
 
 if(MINGW)
   add_executable(app_host_trust_test tests/app_host_trust_test.cpp src/app.cpp src/app_servers.cpp
-    src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+    src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/sshhelper.rc)
   target_include_directories(app_host_trust_test PRIVATE resources)
-  target_link_libraries(app_host_trust_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
+  target_link_libraries(app_host_trust_test PRIVATE sshhelper_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
   set_target_properties(app_host_trust_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/host-trust-window-test")
   foreach(api session_handshake hostkey_hash userauth_password_ex)
     target_link_options(app_host_trust_test PRIVATE "-Wl,--wrap=libssh2_${api}")
@@ -168,12 +168,18 @@ endif()
 
 # Manual integration test; never connects to a server during CTest.
 add_executable(live_transfer_test EXCLUDE_FROM_ALL tests/live_transfer_test.cpp)
-target_link_libraries(live_transfer_test PRIVATE airsftp_core)
+target_link_libraries(live_transfer_test PRIVATE sshhelper_core)
 set_target_properties(live_transfer_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
 
 # Manual, read-only sensor diagnostics using an explicitly selected saved server.
 add_executable(live_telemetry_test EXCLUDE_FROM_ALL tests/live_telemetry_test.cpp)
-target_link_libraries(live_telemetry_test PRIVATE airsftp_core)
+target_link_libraries(live_telemetry_test PRIVATE sshhelper_core)
 set_target_properties(live_telemetry_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
 
-install(TARGETS AirSFTP sshhelper-tool RUNTIME DESTINATION .)
+install(TARGETS sshhelper sshhelper-tool RUNTIME DESTINATION .)
+
+foreach(binary sshhelper sshhelper-tool)
+  set(SSHHELPER_BINARY_NAME "${binary}.exe")
+  configure_file(resources/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/${binary}-version.rc" @ONLY)
+  target_sources(${binary} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/${binary}-version.rc")
+endforeach()

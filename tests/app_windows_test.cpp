@@ -147,7 +147,7 @@ struct AppWindowTest {
         SendMessageW(first.settingsWindow_, WM_COMMAND, App::SelectedFiles, 0);
         CHECK(first.partialTransfer_);
         first.selectSettingsTab(2);
-        CHECK(IsWindowVisible(GetDlgItem(first.settingsWindow_, App::NextHotkey)));
+        CHECK(!FindWindowExW(first.settingsWindow_, nullptr, HOTKEY_CLASSW, nullptr));
         CHECK(!IsWindowVisible(GetDlgItem(first.settingsWindow_, App::UploadButton)));
         first.showSettings(); // Repeated gear clicks must not discard an in-progress edit.
         wchar_t draft[64]{};
@@ -217,20 +217,8 @@ struct AppWindowTest {
         first.transfer_.active = true;
         SendMessageW(first.settingsWindow_, WM_COMMAND, App::CancelTransfer, 0);
         CHECK(!first.transfer_.active && first.transfer_.failed);
-        constexpr unsigned next = MAKEWORD(VK_F20, HOTKEYF_CONTROL | HOTKEYF_ALT);
-        constexpr unsigned previous = MAKEWORD(VK_F21, HOTKEYF_CONTROL | HOTKEYF_ALT);
-        CHECK(first.setHotkeys(next, previous, false));
-        CHECK(first.hotkeysRegistered_);
-        CHECK(SendDlgItemMessageW(second->settingsWindow_, App::NextHotkey, HKM_GETHOTKEY, 0, 0) == next);
-        CHECK(!first.setHotkeys(next, next, false));
-        CHECK(!first.setHotkeys('N', previous, false));
-        CHECK(first.nextHotkey_ == next);
-        CHECK(RegisterHotKey(nullptr, 99, MOD_CONTROL | MOD_ALT, VK_F22));
-        CHECK(!first.setHotkeys(MAKEWORD(VK_F22, HOTKEYF_CONTROL | HOTKEYF_ALT), previous, false));
-        CHECK(first.hotkeysRegistered_ && first.nextHotkey_ == next);
-        UnregisterHotKey(nullptr, 99);
-        UnregisterHotKey(nullptr, 1);
-        UnregisterHotKey(nullptr, 2);
+        // No global switching shortcuts or HOTKEY controls remain.
+        CHECK(!FindWindowExW(first.settingsWindow_, nullptr, HOTKEY_CLASSW, nullptr));
         // Closing the original window must neither quit nor destroy another server.
         first.transfer_.active = true;
         auto pendingDecision = std::make_shared<App::TransferDecision>();

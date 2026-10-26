@@ -26,8 +26,6 @@ struct AppWindowTest {
     static int run(const std::filesystem::path& root) {
         LoopbackSsh server, other;
         App app(GetModuleHandleW(nullptr), root / "AirSFTP.credentials");
-        app.nextHotkey_ = MAKEWORD(VK_F23, HOTKEYF_CONTROL | HOTKEYF_ALT);
-        app.previousHotkey_ = MAKEWORD(VK_F24, HOTKEYF_CONTROL | HOTKEYF_ALT);
         app.config_ = server.config;
         CHECK(app.registerClasses() && app.createMainWindow(SW_HIDE) && app.createTray());
         const auto pins = root / "AirSFTP.known_hosts";

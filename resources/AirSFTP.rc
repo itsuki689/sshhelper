@@ -1,3 +1,0 @@
-#include "resource.h"
-
-IDI_AIRSFTP ICON "AirSFTP.ico"
