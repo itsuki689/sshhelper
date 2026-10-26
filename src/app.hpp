@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models.hpp"
+#include "host_trust_ui.hpp"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -17,7 +18,7 @@
 
 class App {
 public:
-    explicit App(HINSTANCE instance);
+    explicit App(HINSTANCE instance, std::filesystem::path credentials = {});
     ~App();
     int run(int showCommand);
 
@@ -120,6 +121,11 @@ private:
         std::string source, destination;
     };
     std::string transferLocalFolder_;
+    HostTrustConfirmation hostTrustConfirmation();
+    void cancelPendingHostTrust();
+    // Declared before children: the shared UI outlives every child worker.
+    std::unique_ptr<HostTrustUi> hostTrustUi_;
+    std::filesystem::path credentialPath_;
     App* root_ = this;
     std::vector<std::unique_ptr<App>> children_;
     bool deleted_ = false;

@@ -36,38 +36,6 @@ std::filesystem::path knownHostsPath() {
     return std::filesystem::current_path() / L"AirSFTP.known_hosts";
 }
 
-bool verifyOrRememberHost(const ConnectionConfig& config, const std::string& fingerprint,
-                         const std::filesystem::path& path, bool trustNewHosts, std::string& error) {
-    static std::mutex knownHostsMutex;
-    std::lock_guard lock(knownHostsMutex);
-    const std::string key = config.host + ":" + std::to_string(config.port) + " ";
-    std::ifstream input(path);
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.rfind(key, 0) != 0) continue;
-        const std::string known = line.substr(key.size());
-        if (known == fingerprint) return true;
-        error = "SSH host key changed for " + config.host + ". Expected " + known + ", received " + fingerprint;
-        return false;
-    }
-    input.close();
-    if (!trustNewHosts) {
-        error = "SSH host key is not pinned. Connect once in AirSFTP before using sshhelper-tool.";
-        return false;
-    }
-    std::ofstream output(path, std::ios::app);
-    if (!output) {
-        error = "Cannot write portable host key store: " + path.string();
-        return false;
-    }
-    output << key << fingerprint << std::endl;
-    if (!output) {
-        error = "Cannot save SSH host fingerprint";
-        return false;
-    }
-    return true;
-}
-
 bool authenticate(LIBSSH2_SESSION* session, const ConnectionConfig& config, std::string& error) {
     int result = 0;
     if (!config.privateKeyPath.empty()) {
@@ -89,16 +57,19 @@ bool authenticate(LIBSSH2_SESSION* session, const ConnectionConfig& config, std:
 }
 
 SshSession::SshSession(std::stop_token stop, long timeoutMs,
-                     std::filesystem::path hostKeyStore, bool trustNewHosts)
+                     std::filesystem::path hostKeyStore, HostTrustConfirmation confirm,
+                     std::chrono::milliseconds trustTimeout)
     : stop_(stop), timeoutMs_(std::max(1L, timeoutMs)),
       hostKeyStore_(hostKeyStore.empty() ? knownHostsPath() : std::move(hostKeyStore)),
-      trustNewHosts_(trustNewHosts) {}
+      confirmHost_(std::move(confirm)), trustTimeout_(trustTimeout) {}
 
 SshSession::~SshSession() { disconnect(); }
 
-bool SshSession::connect(const ConnectionConfig& config, std::string& error) {
+bool SshSession::connect(const ConnectionConfig& supplied, std::string& error) {
+    const ConnectionConfig config = supplied;
     disconnect();
     error.clear();
+    requiresUserAction_ = false;
     if (stop_.stop_requested()) { error = "Connection cancelled"; return false; }
 
     // Older MinGW SDKs omit these declarations; Windows 8+ exports both APIs.
@@ -221,11 +192,35 @@ bool SshSession::connect(const ConnectionConfig& config, std::string& error) {
         }
         fingerprint_ = stream.str();
     }
-    if (stop_.stop_requested() || fingerprint_.empty() ||
-        !verifyOrRememberHost(config, fingerprint_, hostKeyStore_, trustNewHosts_, error)) {
+    auto attempt = std::make_shared<HostTrustAttempt>(stop_, trustTimeout_);
+    const HostKey key{config.host, config.port, fingerprint_};
+    auto failTrust = [&] {
+        requiresUserAction_ = true;
+        if (error.empty()) error = "SSH host trust attempt cancelled or timed out";
         if (stop_.stop_requested()) error = "Connection cancelled";
         disconnect();
         return false;
+    };
+    if (fingerprint_.empty()) { error = "SSH SHA256 host fingerprint unavailable"; return failTrust(); }
+    const auto status = inspectHostKey(hostKeyStore_, key, stop_, error);
+    if (status == HostKeyStatus::Changed || status == HostKeyStatus::Error) return failTrust();
+    if (status == HostKeyStatus::Unknown) {
+        if (!confirmHost_) {
+            error = "SSH host key is not pinned. Explicitly verify and accept it in AirSFTP before using sshhelper-tool.";
+            return failTrust();
+        }
+        const auto answer = confirmHost_(key, attempt);
+        if (answer != HostTrustResult::Accepted) {
+            error = answer == HostTrustResult::TimedOut ? "SSH host trust confirmation timed out; connect manually to retry" :
+                answer == HostTrustResult::Rejected ? "SSH host trust rejected; connect manually to retry" :
+                "SSH host trust confirmation cancelled; connect manually to retry";
+            return failTrust();
+        }
+        if (!saveHostKey(hostKeyStore_, key, stop_, *attempt, error)) return failTrust();
+    }
+    if (attempt->state() != HostTrustResult::Pending) {
+        error = "SSH host trust attempt cancelled or timed out";
+        return failTrust();
     }
     if (!authenticate(session_, config, error) || stop_.stop_requested()) {
         if (stop_.stop_requested()) error = "Connection cancelled";

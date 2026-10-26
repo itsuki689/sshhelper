@@ -71,7 +71,7 @@ bool App::saveServers() {
     for (auto* server : servers())
         if (server->local_ || !server->config_.host.empty()) saved.servers.push_back(server->profile());
     std::string error;
-    if (saveServerSettings(defaultCredentialPath(), saved, error)) return true;
+    if (saveServerSettings(root_->credentialPath_, saved, error)) return true;
     MessageBoxW(settingsWindow_ ? settingsWindow_ : window_, wide(error).c_str(),
         L"AirSFTP 配置保存失败", MB_OK | MB_ICONWARNING);
     return false;
@@ -230,16 +230,18 @@ void App::uploadDropped(std::vector<std::string> paths) {
     transferLocalFolder_ = encoded(std::filesystem::u8path(paths.front()).parent_path().wstring());
     stopTransfer();
     const auto generation = transferGeneration_;
+    auto confirm = hostTrustConfirmation();
+    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
     transfer_ = {};
     transfer_.active = true;
     transfer_.message = "Connecting";
     transfer_.fileName = "Drop upload";
     InvalidateRect(window_, nullptr, FALSE);
     transferThread_ = std::jthread([this, config = config_, remote = remotePath_,
-        paths = std::move(paths), generation, previous = std::move(transferThread_)](std::stop_token token) mutable {
+        paths = std::move(paths), generation, confirm, pins, previous = std::move(transferThread_)](std::stop_token token) mutable {
         if (previous.joinable()) previous.join();
         if (token.stop_requested()) return;
-        SshSession session(token);
+        SshSession session(token, 15000, pins, confirm);
         std::string error;
         if (!session.connect(config, error)) {
             TransferProgress failure;

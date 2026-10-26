@@ -90,7 +90,7 @@ public:
         double latency = 0;
         if (!session_) {
             parser_ = {}; count_ = 0;
-            session_ = std::make_unique<SshSession>(stop, 15000, pins_, false);
+            session_ = std::make_unique<SshSession>(stop, 15000, pins_);
             if (!session_->connect(config_, error)) session_.reset();
         }
         if (session_ && session_->executeScript(TelemetryParser::probeScript(), output, latency, error)) {

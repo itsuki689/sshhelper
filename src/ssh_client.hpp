@@ -1,6 +1,7 @@
 #pragma once
 
 #include "models.hpp"
+#include "host_trust.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -19,7 +20,8 @@ using TransferConfirmation = std::function<bool(std::size_t, std::uint64_t)>;
 class SshSession {
 public:
     explicit SshSession(std::stop_token stop = {}, long timeoutMs = 15000,
-                        std::filesystem::path hostKeyStore = {}, bool trustNewHosts = true);
+                        std::filesystem::path hostKeyStore = {}, HostTrustConfirmation confirm = {},
+                        std::chrono::milliseconds trustTimeout = std::chrono::seconds(120));
     ~SshSession();
     SshSession(const SshSession&) = delete;
     SshSession& operator=(const SshSession&) = delete;
@@ -28,6 +30,7 @@ public:
     void disconnect();
     bool connected() const { return session_ != nullptr; }
     const std::string& fingerprint() const { return fingerprint_; }
+    bool requiresUserAction() const { return requiresUserAction_; }
 
     bool executeScript(const std::string& script, std::string& output,
                        double& firstByteLatencyMs, std::string& error);
@@ -66,7 +69,9 @@ private:
     std::stop_token stop_;
     long timeoutMs_;
     std::filesystem::path hostKeyStore_;
-    bool trustNewHosts_;
+    HostTrustConfirmation confirmHost_;
+    std::chrono::milliseconds trustTimeout_;
+    bool requiresUserAction_ = false;
     std::mutex socketMutex_;
     std::optional<std::stop_callback<std::function<void()>>> cancellation_;
     LIBSSH2_SESSION* session_ = nullptr;

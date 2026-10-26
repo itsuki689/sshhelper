@@ -35,6 +35,7 @@ FetchContent_MakeAvailable(json)
 add_library(airsftp_core STATIC
   src/credential_store.cpp
   src/ssh_client.cpp
+  src/host_trust.cpp
   src/transfer_engine.cpp
   src/folder_transfer.cpp
   src/telemetry.cpp
@@ -50,6 +51,7 @@ add_executable(AirSFTP WIN32
   src/app.cpp
   src/app_servers.cpp
   src/app_tray.cpp
+  src/host_trust_ui.cpp
   src/transfer_picker.cpp
   resources/AirSFTP.rc
 )
@@ -105,6 +107,14 @@ add_test(NAME ssh_client COMMAND ssh_client_test)
 set_tests_properties(ssh_client PROPERTIES TIMEOUT 10)
 
 if(MINGW)
+  add_executable(host_trust_test tests/host_trust_test.cpp)
+  target_link_libraries(host_trust_test PRIVATE sshhelper_api)
+  foreach(api session_handshake hostkey_hash userauth_password_ex)
+    target_link_options(host_trust_test PRIVATE "-Wl,--wrap=libssh2_${api}")
+  endforeach()
+  add_test(NAME host_trust COMMAND host_trust_test)
+  set_tests_properties(host_trust PROPERTIES TIMEOUT 30)
+
   add_executable(transfer_test tests/transfer_test.cpp)
   target_link_libraries(transfer_test PRIVATE airsftp_core)
   # Isolate the test-only pinned host key from the application.
@@ -129,12 +139,25 @@ if(MINGW)
 
 endif()
 
-add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/app_tray.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+add_executable(app_windows_test tests/app_windows_test.cpp src/app.cpp src/app_servers.cpp src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
 target_include_directories(app_windows_test PRIVATE resources)
 target_link_libraries(app_windows_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
 set_target_properties(app_windows_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/window-test")
 add_test(NAME app_windows COMMAND app_windows_test)
 set_tests_properties(app_windows PROPERTIES TIMEOUT 15)
+
+if(MINGW)
+  add_executable(app_host_trust_test tests/app_host_trust_test.cpp src/app.cpp src/app_servers.cpp
+    src/app_tray.cpp src/host_trust_ui.cpp src/transfer_picker.cpp resources/AirSFTP.rc)
+  target_include_directories(app_host_trust_test PRIVATE resources)
+  target_link_libraries(app_host_trust_test PRIVATE airsftp_core d2d1 dwrite dwmapi comdlg32 shell32 ole32 comctl32 uuid)
+  set_target_properties(app_host_trust_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/host-trust-window-test")
+  foreach(api session_handshake hostkey_hash userauth_password_ex)
+    target_link_options(app_host_trust_test PRIVATE "-Wl,--wrap=libssh2_${api}")
+  endforeach()
+  add_test(NAME app_host_trust COMMAND app_host_trust_test)
+  set_tests_properties(app_host_trust PROPERTIES TIMEOUT 20)
+endif()
 
 # Manual integration test; never connects to a server during CTest.
 add_executable(live_transfer_test EXCLUDE_FROM_ALL tests/live_transfer_test.cpp)

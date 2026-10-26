@@ -18,7 +18,8 @@ int runTests() {
     auto utf8 = [](const fs::path& path) { const auto s = path.generic_u8string(); return std::string(s.begin(), s.end()); };
     auto read = [](const fs::path& path) { std::ifstream f(path, std::ios::binary); return std::string(std::istreambuf_iterator<char>(f), {}); };
     std::stop_source stop;
-    SshSession session(stop.get_token());
+    SshSession session(stop.get_token(), 15000, root / "test.known_hosts",
+        [](const HostKey&, const auto&) { return HostTrustResult::Accepted; });
     std::vector<TransferEntry> entries;
     CHECK(session.listFolder(TransferDirection::Upload, utf8(source), entries, error));
     CHECK(entries.size() == 6);

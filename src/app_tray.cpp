@@ -83,6 +83,7 @@ LRESULT CALLBACK App::trayWindowProc(HWND window, UINT message, WPARAM wParam, L
 }
 
 void App::hideToTray() {
+    cancelPendingHostTrust();
     if (!root_->trayWindow_) { DestroyWindow(window_); return; }
     showWhenConnected_ = false;
     if (animating_) finishWindowAnimation();
@@ -209,6 +210,7 @@ void App::quitApplication() {
     if (root_ != this) { root_->quitApplication(); return; }
     if (exiting_) return;
     exiting_ = true;
+    if (hostTrustUi_) hostTrustUi_->shutdown();
     // Request cancellation everywhere before any worker is joined by destructors.
     stopMonitor(); stopTransfer();
     for (auto& child : children_) { child->stopMonitor(); child->stopTransfer(); }

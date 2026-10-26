@@ -18,6 +18,8 @@ std::wstring wide(const std::string& value) {
     return result;
 }
 struct Picker {
+    HostTrustConfirmation confirm;
+    std::filesystem::path pins;
     ConnectionConfig config;
     TransferDirection direction;
     std::string folder;
@@ -91,7 +93,7 @@ INT_PTR CALLBACK dialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         SetWindowPos(window, nullptr, x, y, width, height, SWP_NOZORDER);
         layout(window, *state);
         state->scanner = std::jthread([state](std::stop_token stop) {
-            SshSession session(stop);
+            SshSession session(stop, 15000, state->pins, state->confirm);
             std::vector<TransferEntry> entries;
             std::string error;
             if (state->direction == TransferDirection::Upload || session.connect(state->config, error))
@@ -211,10 +213,13 @@ INT_PTR CALLBACK dialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 bool chooseTransferEntries(HWND owner, const ConnectionConfig& config, TransferDirection direction,
-                           const std::string& sourceFolder, std::vector<std::string>& selected) {
+                           const std::string& sourceFolder, std::vector<std::string>& selected,
+                           HostTrustConfirmation confirm, std::filesystem::path pins) {
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_LISTVIEW_CLASSES};
     InitCommonControlsEx(&controls);
     Picker state;
+    state.confirm = std::move(confirm);
+    state.pins = std::move(pins);
     state.config = config;
     state.direction = direction;
     state.folder = sourceFolder;

@@ -7,7 +7,7 @@ Windows 本机采样及 DPAPI 配置读取代码。Codex 通过 stdin/stdout 的
 ## 安装
 
 运行 `build-exe.bat` 构建并测试。`dist` 下会得到 `AirSFTP.exe` 和 `sshhelper-tool.exe`。
-先在 AirSFTP 保存 SSH 配置并成功连接一次，以记录服务器指纹。
+先在 AirSFTP 保存 SSH 配置，通过可信渠道核对首次确认窗口中的主机、端口和 SHA256 指纹，明确接受并成功保存后再连接。
 
 在项目根目录运行：
 

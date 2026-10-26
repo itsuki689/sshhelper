@@ -349,7 +349,8 @@ void drawGearIcon(ID2D1HwndRenderTarget* target, ID2D1Factory* factory,
 }
 }
 
-App::App(HINSTANCE instance) : instance_(instance) {
+App::App(HINSTANCE instance, std::filesystem::path credentials)
+    : credentialPath_(credentials.empty() ? defaultCredentialPath() : std::move(credentials)), instance_(instance) {
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2dFactory_);
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&writeFactory_));
     if (writeFactory_) {
@@ -402,7 +403,7 @@ App::~App() {
 int App::run(int showCommand) {
     ServerSettings saved;
     std::string error;
-    loadServerSettings(defaultCredentialPath(), saved, error);
+    loadServerSettings(credentialPath_, saved, error);
     if (std::none_of(saved.servers.begin(), saved.servers.end(), [](const auto& p) { return p.local; })) {
         ServerProfile local; local.local = true; local.name = "本机";
         saved.servers.push_back(std::move(local));
@@ -437,7 +438,8 @@ int App::run(int showCommand) {
             switchServer(message.wParam == 2);
             continue;
         }
-        bool handled = false;
+        bool handled = hostTrustUi_ && hostTrustUi_->translate(message);
+        if (handled) continue;
         for (auto* server : servers()) {
             if (server->settingsWindow_ && IsWindowVisible(server->settingsWindow_) &&
                 IsDialogMessageW(server->settingsWindow_, &message)) { handled = true; break; }
@@ -724,6 +726,7 @@ LRESULT App::handleMainMessage(HWND window, UINT message, WPARAM wParam, LPARAM 
     case WM_DESTROY: {
         stopMonitor();
         stopTransfer();
+        cancelPendingHostTrust();
         {
             std::lock_guard lock(messageMutex_);
             messageWindow_ = nullptr;
@@ -1801,6 +1804,7 @@ LRESULT App::handleSettingsMessage(HWND window, UINT message, WPARAM wParam, LPA
             if (local_) return 0;
             if (MessageBoxW(settingsWindow_, L"删除此服务器的已保存配置并关闭窗口？",
                 L"AirSFTP", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
+            stopMonitor(); stopTransfer(); cancelPendingHostTrust();
             deleted_ = true;
             if (!saveServers()) { deleted_ = false; return 0; }
             DestroyWindow(window_);
@@ -1879,6 +1883,11 @@ bool App::rememberConnection(const ConnectionConfig& config, const std::string& 
         return false;
     }
     const auto old = profile();
+    const auto& c = old.connection;
+    if (c.host != config.host || c.port != config.port || c.username != config.username ||
+        c.password != config.password || c.privateKeyPath != config.privateKeyPath || c.keyPassphrase != config.keyPassphrase) {
+        stopMonitor(); stopTransfer(); cancelPendingHostTrust();
+    }
     const auto oldNext = root_->nextHotkey_, oldPrevious = root_->previousHotkey_;
     const auto next = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, NextHotkey, HKM_GETHOTKEY, 0, 0));
     const auto previous = static_cast<unsigned>(SendDlgItemMessageW(settingsWindow_, PreviousHotkey, HKM_GETHOTKEY, 0, 0));
@@ -1951,13 +1960,16 @@ void App::waitRefreshInterval(std::stop_token token) const {
 }
 
 void App::startMonitor(const ConnectionConfig& config) {
+    if (root_->exiting_ || deleted_) return;
     stopMonitor();
     const auto generation = monitorGeneration_;
+    auto confirm = hostTrustConfirmation();
+    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
     TelemetrySnapshot connecting;
     connecting.status = "Connecting";
     postSnapshot(connecting, generation);
     // Join the cancelled predecessor on the replacement worker, never in a UI handler.
-    monitorThread_ = std::jthread([this, config, generation,
+    monitorThread_ = std::jthread([this, config, generation, confirm, pins,
         previous = std::move(monitorThread_)](std::stop_token token) mutable {
         if (previous.joinable()) previous.join();
         if (local_) {
@@ -1969,12 +1981,13 @@ void App::startMonitor(const ConnectionConfig& config) {
             return;
         }
         while (!token.stop_requested()) {
-            SshSession session(token);
+            SshSession session(token, 15000, pins, confirm);
             TelemetryParser parser; // Reconnects must not reuse counters from an old boot.
             std::string error;
             if (!session.connect(config, error)) {
                 TelemetrySnapshot failed; failed.status = error;
                 postSnapshot(std::move(failed), generation);
+                if (session.requiresUserAction()) break;
                 sleepStopped(token, std::chrono::seconds(3));
                 continue;
             }
@@ -2018,12 +2031,15 @@ void App::startTransfer(TransferDirection direction) {
                     L"AirSFTP", MB_OK | MB_ICONWARNING);
         return;
     }
+    auto confirm = hostTrustConfirmation();
+    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
     std::optional<std::vector<std::string>> selection;
     if (partialTransfer_) {
         selection.emplace();
         if (!chooseTransferEntries(settingsWindow_, config, direction,
-            direction == TransferDirection::Upload ? local : remote, *selection)) return;
+            direction == TransferDirection::Upload ? local : remote, *selection, confirm, pins)) return;
     }
+    if (root_->exiting_ || deleted_ || !window_) return;
     if (!rememberConnection(config, local, remote)) return;
     startMonitor(config_);
     stopTransfer();
@@ -2032,12 +2048,12 @@ void App::startTransfer(TransferDirection direction) {
     transfer_ = {}; transfer_.active = true; transfer_.direction = direction;
     transfer_.message = "Scanning / connecting";
     hideSettings();
-    transferThread_ = std::jthread([this, config, local, remote, direction, generation, selection,
+    transferThread_ = std::jthread([this, config, local, remote, direction, generation, selection, confirm, pins,
         previous = std::move(transferThread_)](std::stop_token token) mutable {
         // Prevent two successive transfers from writing the same destination concurrently.
         if (previous.joinable()) previous.join();
         if (token.stop_requested()) return;
-        SshSession session(token);
+        SshSession session(token, 15000, pins, confirm);
         std::string error;
         TransferProgress state; state.active = true; state.direction = direction;
         const auto& path = direction == TransferDirection::Upload ? local : remote;
@@ -2061,4 +2077,12 @@ void App::startTransfer(TransferDirection direction) {
 void App::stopTransfer() {
     ++transferGeneration_;
     if (transferThread_.joinable()) transferThread_.request_stop();
+}
+
+HostTrustConfirmation App::hostTrustConfirmation() {
+    if (!root_->hostTrustUi_) root_->hostTrustUi_ = std::make_unique<HostTrustUi>(instance_);
+    return root_->hostTrustUi_->confirmation(this);
+}
+void App::cancelPendingHostTrust() {
+    if (root_->hostTrustUi_) root_->hostTrustUi_->cancelOwner(this);
 }
