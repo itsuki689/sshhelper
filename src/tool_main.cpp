@@ -15,19 +15,26 @@ std::string utf8(const std::wstring& text) {
 int run(int argc, wchar_t** argv) {
     auto credentials = defaultCredentialPath();
     std::string mode = "--stdio", server;
+    std::filesystem::path selectedDirectory;
+    bool explicitCredentials = false, showDirectory = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--help" || arg == L"-h") {
-            std::cout << "sshhelper-tool [--stdio | --list-servers | --snapshot] [--credentials FILE] [--server ID]\n"
+            std::cout << "sshhelper-tool [--stdio | --list-servers | --snapshot] [--credentials FILE | --data-dir DIR] [--server ID] [--show-data-dir]\n"
                 "Default: MCP JSON-RPC over stdin/stdout. Read-only; uses saved AirSFTP profiles and host-key pins.\n";
             return 0;
         }
         if (arg == L"--version") { std::cout << "sshhelper-tool " SSHHELPER_VERSION_STRING "\n"; return 0; }
-        if (arg == L"--credentials" && i + 1 < argc) credentials = std::filesystem::absolute(argv[++i]);
+        if (arg == L"--credentials" && i + 1 < argc) { credentials = std::filesystem::absolute(argv[++i]); explicitCredentials = true; }
+        else if (arg == L"--data-dir" && i + 1 < argc) selectedDirectory = dataDirectory(argv[++i]);
+        else if (arg == L"--show-data-dir") showDirectory = true;
         else if (arg == L"--server" && i + 1 < argc) server = utf8(argv[++i]);
         else if (arg == L"--stdio" || arg == L"--snapshot" || arg == L"--list-servers") mode = utf8(arg);
         else throw std::invalid_argument("Unknown or incomplete command line argument");
     }
+    if (explicitCredentials && !selectedDirectory.empty()) throw std::invalid_argument("Choose --credentials or --data-dir, not both");
+    if (!selectedDirectory.empty()) credentials = selectedDirectory / L"sshhelper.credentials";
+    if (showDirectory) { std::cout << utf8(credentials.parent_path().wstring()) << '\n'; return 0; }
     monitor_api::Service service(credentials);
     if (mode == "--stdio") {
         _setmode(_fileno(stdin), _O_BINARY);

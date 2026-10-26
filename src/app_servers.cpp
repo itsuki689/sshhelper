@@ -160,7 +160,7 @@ void App::uploadDropped(std::vector<std::string> paths) {
     stopTransfer();
     const auto generation = transferGeneration_;
     auto confirm = hostTrustConfirmation();
-    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
+    const auto pins = hostKeyPathForCredentials(root_->credentialPath_);
     transfer_ = {};
     transfer_.active = true;
     transfer_.message = "Connecting";

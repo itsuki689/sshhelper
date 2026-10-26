@@ -181,7 +181,7 @@ struct Service::Impl {
     std::map<std::string, std::unique_ptr<Worker>> workers;
     Impl(std::filesystem::path path, SourceFactory source) : credentials(std::move(path)), factory(std::move(source)) {
         if (!factory) {
-            const auto pins = credentials.parent_path() / L"AirSFTP.known_hosts";
+            const auto pins = hostKeyPathForCredentials(credentials);
             factory = [pins](const ServerProfile& profile) -> std::unique_ptr<Source> {
                 if (profile.local) return std::make_unique<LocalSource>();
                 return std::make_unique<RemoteSource>(profile.connection, pins);

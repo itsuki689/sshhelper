@@ -11,7 +11,8 @@ std::filesystem::path executablePath() {
     return std::filesystem::path(std::wstring(buffer.data(), length));
 }
 
-bool launchAfterExit(const std::filesystem::path& executable, std::wstring& error) {
+bool launchAfterExit(const std::filesystem::path& executable, std::wstring& error,
+                     const std::filesystem::path& dataDirectory) {
     error.clear();
     HANDLE parent = nullptr;
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &parent,
@@ -31,6 +32,7 @@ bool launchAfterExit(const std::filesystem::path& executable, std::wstring& erro
         PROCESS_INFORMATION process{};
         std::wstring command = L"\"" + executable.wstring() + L"\" --restart-wait-handle " +
             std::to_wstring(reinterpret_cast<ULONG_PTR>(parent));
+        if (!dataDirectory.empty()) command += L" --data-dir \"" + dataDirectory.wstring() + L"\"";
         launched = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
             EXTENDED_STARTUPINFO_PRESENT, nullptr, executable.parent_path().c_str(), &startup.StartupInfo, &process) != FALSE;
         failure = launched ? ERROR_SUCCESS : GetLastError();

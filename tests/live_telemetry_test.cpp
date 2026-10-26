@@ -21,18 +21,9 @@ int run(int argc, char** argv) {
     const auto found = std::find_if(saved.servers.begin(), saved.servers.end(),
         [&](const auto& profile) { return profile.connection.host == argv[1]; });
     require(found != saved.servers.end(), "No saved profile for the specified host");
-    const auto pins = fs::u8path(argv[2]).parent_path() / "AirSFTP.known_hosts";
-    const auto testPins = defaultCredentialPath().parent_path() / "AirSFTP.known_hosts";
+    const auto pins = hostKeyPathForCredentials(fs::u8path(argv[2]));
     require(fs::exists(pins), "Existing application host-key pins required");
-    if (!fs::equivalent(pins.parent_path(), testPins.parent_path())) {
-        std::ifstream input(pins, std::ios::binary);
-        std::ofstream output(testPins, std::ios::binary | std::ios::trunc);
-        require(input.good() && output.good(), "Cannot open host-key pins");
-        output << input.rdbuf();
-        output.close();
-        require(!input.bad() && !output.fail(), "Cannot copy host-key pins");
-    }
-    SshSession session;
+    SshSession session({}, 15000, pins);
     require(session.connect(found->connection, error), "Connect: " + error);
     std::string output;
     double latency = 0;

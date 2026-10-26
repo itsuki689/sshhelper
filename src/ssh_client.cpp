@@ -1,4 +1,5 @@
 #include "ssh_client.hpp"
+#include "app_paths.hpp"
 
 #include <libssh2.h>
 #include <libssh2_sftp.h>
@@ -29,11 +30,7 @@ std::string fileName(const std::string& value) {
 }
 
 std::filesystem::path knownHostsPath() {
-    std::vector<wchar_t> buffer(32768);
-    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (length > 0 && length < buffer.size())
-        return std::filesystem::path(buffer.data()).parent_path() / L"AirSFTP.known_hosts";
-    return std::filesystem::current_path() / L"AirSFTP.known_hosts";
+    return hostKeyPathForCredentials(defaultCredentialPath());
 }
 
 bool authenticate(LIBSSH2_SESSION* session, const ConnectionConfig& config, std::string& error) {

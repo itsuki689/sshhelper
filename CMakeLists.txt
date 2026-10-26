@@ -33,6 +33,7 @@ FetchContent_Declare(json
 FetchContent_MakeAvailable(json)
 
 add_library(sshhelper_core STATIC
+  src/app_paths.cpp
   src/credential_store.cpp
   src/ssh_client.cpp
   src/host_trust.cpp
@@ -43,7 +44,7 @@ add_library(sshhelper_core STATIC
   src/restart_process.cpp
 )
 target_include_directories(sshhelper_core PUBLIC src)
-target_link_libraries(sshhelper_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt iphlpapi psapi wbemuuid ole32 oleaut32 advapi32 pdh)
+target_link_libraries(sshhelper_core PUBLIC libssh2::libssh2 ws2_32 crypt32 bcrypt iphlpapi psapi wbemuuid ole32 oleaut32 advapi32 pdh shell32 uuid)
 target_compile_definitions(sshhelper_core PUBLIC SSHHELPER_VERSION_STRING="${PROJECT_VERSION}" UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 
 add_executable(sshhelper WIN32
@@ -112,6 +113,10 @@ set_tests_properties(restart_process PROPERTIES TIMEOUT 15)
 add_test(NAME credential_store COMMAND credential_store_test)
 add_test(NAME ssh_client COMMAND ssh_client_test)
 set_tests_properties(ssh_client PROPERTIES TIMEOUT 10)
+add_executable(app_paths_test tests/app_paths_test.cpp)
+target_link_libraries(app_paths_test PRIVATE sshhelper_core)
+add_test(NAME app_paths COMMAND app_paths_test)
+set_tests_properties(app_paths PROPERTIES TIMEOUT 10)
 
 if(MINGW)
   add_executable(host_trust_test tests/host_trust_test.cpp)
@@ -177,6 +182,12 @@ target_link_libraries(live_telemetry_test PRIVATE sshhelper_core)
 set_target_properties(live_telemetry_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/live-test")
 
 install(TARGETS sshhelper sshhelper-tool RUNTIME DESTINATION .)
+
+# All automated tests are isolated from the real user's default data directory.
+get_property(SSHHELPER_TESTS DIRECTORY PROPERTY TESTS)
+foreach(test IN LISTS SSHHELPER_TESTS)
+  set_tests_properties(${test} PROPERTIES ENVIRONMENT "SSHHELPER_DATA_DIR=${CMAKE_BINARY_DIR}/test-data/${test}")
+endforeach()
 
 foreach(binary sshhelper sshhelper-tool)
   set(SSHHELPER_BINARY_NAME "${binary}.exe")

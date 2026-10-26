@@ -31,11 +31,9 @@ int run(int argc,char** argv) {
     for(int i=0;i<12;++i)std::ofstream(root/"source"/("small-"+std::to_string(i)+".txt"))<<"test "<<i;
     std::ofstream(root/"source"/fs::path(L"中文.txt"))<<"unicode";
     // Use the same pinned host keys as the application before authenticating.
-    const auto pins = fs::u8path(argv[2]).parent_path() / "AirSFTP.known_hosts";
-    const auto testPins = defaultCredentialPath().parent_path() / "AirSFTP.known_hosts";
-    if (fs::exists(pins) && !fs::equivalent(pins.parent_path(), testPins.parent_path()))
-        fs::copy_file(pins, testPins, fs::copy_options::overwrite_existing);
-    SshSession session;
+    const auto pins = hostKeyPathForCredentials(fs::u8path(argv[2]));
+    require(fs::exists(pins), "Existing application host-key pins required");
+    SshSession session({}, 15000, pins);
     require(session.connect(config,error),"Connect: "+error);
     std::string output;double latency=0;
     require(session.executeScript("umask 077\nmktemp -d /tmp/airsftp-test.XXXXXXXXXX\n",output,latency,error),error);
@@ -85,7 +83,7 @@ int run(int argc,char** argv) {
         require(session.transfer(TransferDirection::Upload,encoded(old),remote+"/resume.bin",progress,error),error);
         std::stop_source cancelUpload;
         {
-            SshSession interrupted(cancelUpload.get_token());
+            SshSession interrupted(cancelUpload.get_token(), 15000, pins);
             require(interrupted.connect(config,error),error);
             require(!interrupted.transfer(TransferDirection::Upload,encoded(source),remote+"/resume.bin",
                 [&](const TransferProgress& p){final=p;if(p.active&&p.transferred>=1048576)cancelUpload.request_stop();},error),"Upload did not cancel");
@@ -98,7 +96,7 @@ int run(int argc,char** argv) {
         const auto target=root/"resume-download.bin";std::ofstream(target)<<"original-local";
         std::stop_source cancelDownload;
         {
-            SshSession interrupted(cancelDownload.get_token());
+            SshSession interrupted(cancelDownload.get_token(), 15000, pins);
             require(interrupted.connect(config,error),error);
             require(!interrupted.transfer(TransferDirection::Download,encoded(target),remote+"/resume.bin",
                 [&](const TransferProgress& p){final=p;if(p.active&&p.transferred>=1048576)cancelDownload.request_stop();},error),"Download did not cancel");

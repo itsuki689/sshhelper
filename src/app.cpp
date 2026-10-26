@@ -1939,7 +1939,7 @@ void App::startMonitor(const ConnectionConfig& config) {
     stopMonitor();
     const auto generation = monitorGeneration_;
     auto confirm = hostTrustConfirmation();
-    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
+    const auto pins = hostKeyPathForCredentials(root_->credentialPath_);
     TelemetrySnapshot connecting;
     connecting.status = "Connecting";
     postSnapshot(connecting, generation);
@@ -2007,7 +2007,7 @@ void App::startTransfer(TransferDirection direction) {
         return;
     }
     auto confirm = hostTrustConfirmation();
-    const auto pins = root_->credentialPath_.parent_path() / L"AirSFTP.known_hosts";
+    const auto pins = hostKeyPathForCredentials(root_->credentialPath_);
     std::optional<std::vector<std::string>> selection;
     if (partialTransfer_) {
         selection.emplace();

@@ -27,6 +27,7 @@ bool writeV2Profile(const std::filesystem::path& path, unsigned version = 2) {
     for (const auto* text : {"v2.example", "user", "test-password", "", "", "Legacy", "D:/data", "/tmp"}) str(text);
     u32(0xFFFFFF); u32(0x1D1D1F);
     if (version >= 3) u32(7);
+    if (version >= 4) u32(0);
     unsigned char salt[] = "AirSFTP/credentials/v1";
     // The original entropy includes its terminating null byte (23 bytes total).
     unsigned char entropyBytes[23]{};
@@ -136,6 +137,9 @@ int main() {
     CHECK(loadServerSettings(path, restored, error));
     CHECK(restored.servers.size() == 1 && !restored.servers[0].local);
     CHECK(restored.servers[0].refreshIntervalSeconds == 7);
+    CHECK(writeV2Profile(path, 4));
+    CHECK(loadServerSettings(path, restored, error));
+    CHECK(restored.servers.size() == 1 && restored.servers[0].refreshIntervalSeconds == 7);
     auto withLocal = multiple;
     ServerProfile local; local.local = true; local.name = "本机"; local.refreshIntervalSeconds = 5;
     local.background = 0x18212C;

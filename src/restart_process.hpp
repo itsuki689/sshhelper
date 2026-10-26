@@ -7,7 +7,8 @@
 namespace restart_process {
 std::filesystem::path executablePath();
 // Starts a replacement that waits on an inherited SYNCHRONIZE-only parent handle.
-bool launchAfterExit(const std::filesystem::path& executable, std::wstring& error);
+bool launchAfterExit(const std::filesystem::path& executable, std::wstring& error,
+                     const std::filesystem::path& dataDirectory = {});
 // Used before any windows, shortcuts or monitoring sessions are created.
 bool waitForParent(std::wstring_view inheritedHandle);
 }

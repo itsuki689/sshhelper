@@ -54,19 +54,20 @@ void clearBytes(std::vector<unsigned char>& bytes) {
 std::string windowsError(const char* prefix) {
     return std::string(prefix) + " (Windows error " + std::to_string(GetLastError()) + ")";
 }
+bool ensureParent(const std::filesystem::path& path, std::string& error) {
+    if (path.parent_path().empty()) return true;
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (!ec) return true;
+    error = "Cannot create credential directory: " + ec.message();
+    return false;
 }
-
-std::filesystem::path defaultCredentialPath() {
-    std::vector<wchar_t> buffer(32768);
-    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (length > 0 && length < buffer.size())
-        return std::filesystem::path(buffer.data()).parent_path() / L"AirSFTP.credentials";
-    return std::filesystem::current_path() / L"AirSFTP.credentials";
 }
 
 bool saveConnectionCredentials(const std::filesystem::path& path,
                                const ConnectionConfig& config, std::string& error) {
     error.clear();
+    if (!ensureParent(path, error)) return false;
     std::vector<unsigned char> plain;
     appendU32(plain, Version);
     appendU32(plain, static_cast<std::uint32_t>(config.port));
@@ -169,6 +170,7 @@ bool loadConnectionCredentials(const std::filesystem::path& path,
 bool saveServerSettings(const std::filesystem::path& path,
                                const ServerSettings& settings, std::string& error) {
     error.clear();
+    if (!ensureParent(path, error)) return false;
     std::vector<unsigned char> plain;
     const auto localCount = std::count_if(settings.servers.begin(), settings.servers.end(), [](const auto& p) { return p.local; });
     if (settings.servers.size() > 65 || localCount > 1 || settings.servers.size() - localCount > 64) {

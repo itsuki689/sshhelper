@@ -198,7 +198,7 @@ void App::restartApplication() {
         if (std::filesystem::is_regular_file(current, error)) executable = current;
     }
     std::wstring error;
-    if (!restart_process::launchAfterExit(executable, error)) {
+    if (!restart_process::launchAfterExit(executable, error, credentialPath_.parent_path())) {
         MessageBoxW(trayWindow_ ? trayWindow_ : window_, (error + L"\n当前程序继续运行。").c_str(),
             L"sshhelper 重启失败", MB_OK | MB_ICONWARNING);
         return;
