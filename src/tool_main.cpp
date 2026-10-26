@@ -21,7 +21,7 @@ int run(int argc, wchar_t** argv) {
         const std::wstring arg = argv[i];
         if (arg == L"--help" || arg == L"-h") {
             std::cout << "sshhelper-tool [--stdio | --list-servers | --snapshot] [--credentials FILE | --data-dir DIR] [--server ID] [--show-data-dir]\n"
-                "Default: MCP JSON-RPC over stdin/stdout. Read-only; uses saved AirSFTP profiles and host-key pins.\n";
+                "Default: MCP JSON-RPC over stdin/stdout. Read-only; uses saved sshhelper profiles and host-key pins.\n";
             return 0;
         }
         if (arg == L"--version") { std::cout << "sshhelper-tool " SSHHELPER_VERSION_STRING "\n"; return 0; }

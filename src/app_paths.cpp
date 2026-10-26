@@ -31,7 +31,9 @@ std::filesystem::path dataDirectory(const std::filesystem::path& requested) {
 std::filesystem::path defaultCredentialPath() { return dataDirectory() / L"sshhelper.credentials"; }
 std::filesystem::path hostKeyPathForCredentials(const std::filesystem::path& credentials) {
     // --credentials keeps existing explicitly selected AirSFTP installations usable.
-    return credentials.parent_path() / (credentials.filename() == L"AirSFTP.credentials" ?
+    const auto name = credentials.filename().wstring();
+    const bool legacy = CompareStringOrdinal(name.c_str(), -1, L"AirSFTP.credentials", -1, TRUE) == CSTR_EQUAL;
+    return credentials.parent_path() / (legacy ?
         L"AirSFTP.known_hosts" : L"sshhelper.known_hosts");
 }
 bool migrateLegacyData(const std::filesystem::path& sourceDirectory,

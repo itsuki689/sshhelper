@@ -5,14 +5,14 @@ if (!$Directory) { $Directory = Join-Path $PSScriptRoot '..\dist' }
 
 $root = (Resolve-Path -LiteralPath $Directory).Path
 $info = Get-Content -LiteralPath (Join-Path $root 'build-info.json') -Raw | ConvertFrom-Json
-if ($info.schema_version -ne 1 -or $info.source_commit -notmatch '^[0-9a-f]{40}$' -or
-    $info.ci.head_sha -cne $info.source_commit -or $info.ci.conclusion -ne 'success') {
+if ($info.schema_version -ne 2 -or $info.product -cne 'sshhelper' -or $info.source_commit -notmatch '^[0-9a-f]{40}$' -or
+    ($null -ne $info.ci -and $info.ci.head_sha -cne $info.source_commit)) {
     throw 'Invalid distribution provenance.'
 }
-$names = @('AirSFTP.exe', 'sshhelper-tool.exe')
+$names = @('sshhelper.exe', 'sshhelper-tool.exe')
 $sums = @{}
 foreach ($line in Get-Content -LiteralPath (Join-Path $root 'SHA256SUMS')) {
-    if ($line -notmatch '^([0-9a-fA-F]{64})  (AirSFTP\.exe|sshhelper-tool\.exe)$') { throw 'Invalid SHA256SUMS entry.' }
+    if ($line -notmatch '^([0-9a-fA-F]{64})  (sshhelper\.exe|sshhelper-tool\.exe)$') { throw 'Invalid SHA256SUMS entry.' }
     if ($sums.ContainsKey($Matches[2])) { throw 'Duplicate SHA256SUMS entry.' }
     $sums[$Matches[2]] = $Matches[1].ToLowerInvariant()
 }
@@ -27,8 +27,27 @@ foreach ($name in $names) {
     try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose(); $stream.Dispose() }
     if ($records[0].sha256 -cne $hash -or $sums[$name] -cne $hash -or $records[0].size_bytes -ne $file.Length) {
-        throw "Distribution checksum mismatch: $name. Download the complete project again."
+        throw "Distribution checksum mismatch: $name. Download the complete Release ZIP again."
     }
-    Write-Output "$hash  $name"
+    $status = $records[0].authenticode.status
+    if ($status -eq 'NotSigned') {
+        $reader = New-Object IO.BinaryReader([IO.File]::OpenRead($file.FullName))
+        try {
+            $reader.BaseStream.Position = 0x3c; $pe = $reader.ReadUInt32()
+            $reader.BaseStream.Position = $pe + 24; $magic = $reader.ReadUInt16()
+            if ($magic -notin @(0x10b, 0x20b)) { throw 'Invalid PE header.' }
+            $directories = if ($magic -eq 0x20b) { 112 } else { 96 }
+            $reader.BaseStream.Position = $pe + 24 + $directories + 4 * 8 + 4
+            if ($reader.ReadUInt32() -ne 0) { throw 'EXE signature state differs from manifest.' }
+        } finally { $reader.Dispose() }
+    } elseif ($status -eq 'Valid') {
+        Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security')
+        $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+        if ($signature.Status.ToString() -ne 'Valid' -or
+            $signature.SignerCertificate.Thumbprint -cne $records[0].authenticode.signer_thumbprint) {
+            throw 'Authenticode signer validation failed.'
+        }
+    } else { throw 'Unsupported signature state.' }
+    Write-Output "$hash  $name (Authenticode: $($records[0].authenticode.status))"
 }
-Write-Output "Verified source $($info.source_commit); CI $($info.ci.run_url)"
+Write-Output "Verified sshhelper $($info.version), source $($info.source_commit)"

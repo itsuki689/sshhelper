@@ -7,7 +7,6 @@ npm-debug.log*
 AirSFTP.known_hosts
 AirSFTP.credentials
 dist/*
-!dist/AirSFTP.exe
-!dist/sshhelper-tool.exe
-!dist/build-info.json
-!dist/SHA256SUMS
+*.exe
+*.pfx
+*.p12

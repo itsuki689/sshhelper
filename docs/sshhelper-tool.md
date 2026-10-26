@@ -1,13 +1,13 @@
 # sshhelper-tool：Codex 即时监控接口
 
-`sshhelper-tool.exe` 是原生 Windows 本地 MCP 服务，复用 AirSFTP 的 Linux SSH 探针、
+`sshhelper-tool.exe` 是原生 Windows 本地 MCP 服务，复用 sshhelper 的 Linux SSH 探针、
 Windows 本机采样及 DPAPI 配置读取代码。Codex 通过 stdin/stdout 的逐行 JSON-RPC 调用它；
 不监听网络端口，无需 Node.js、Python 或 OpenAI API Key。悬浮窗无需运行。
 
 ## 安装
 
-[下载完整项目 ZIP](https://github.com/itsuki689/sshhelper/archive/refs/heads/master.zip) 并解压，`dist` 中已包含经 Windows CI 验证的两个 EXE；先运行 `powershell -File scripts/verify-dist.ps1` 核验。来源与各文件 SHA256 见 `dist/build-info.json`、`dist/SHA256SUMS`。自行执行 `build-exe.bat` 时，本地编译结果在 `build` 中，不会覆盖已交付的 `dist`。
-先在 AirSFTP 保存 SSH 配置，通过可信渠道核对首次确认窗口中的主机、端口和 SHA256 指纹，明确接受并成功保存后再连接。
+[下载 Windows Release ZIP](https://github.com/itsuki689/sshhelper/releases/latest) 并完整解压，运行 `powershell -File scripts/verify-dist.ps1` 核验；来源、EXE SHA256 和实际签名状态见 `dist/build-info.json`。源码仓库不包含 EXE，自行构建的结果在 `build` 中。
+先在 sshhelper 保存 SSH 配置，通过可信渠道核对首次确认窗口中的主机、端口和 SHA256 指纹，明确接受并成功保存后再连接。
 
 在项目根目录运行：
 
@@ -25,12 +25,10 @@ codex mcp get sshhelper-tool
 手动注册等价命令（按实际安装位置修改）：
 
 ```powershell
-codex mcp add sshhelper-tool -- F:\Testcode\sshhelper\dist\sshhelper-tool.exe --stdio --credentials F:\Testcode\sshhelper\dist\AirSFTP.credentials
+codex mcp add sshhelper-tool -- C:\Tools\sshhelper\dist\sshhelper-tool.exe --stdio
 ```
 
-在其他目录部署时，将两个 EXE、`AirSFTP.credentials` 和 `AirSFTP.known_hosts` 放在一起，
-重新运行脚本并指定 `-ExecutablePath`；配置仍只能由原 Windows 用户解密。
-可用 `-CredentialsPath` 选择其他配置文件，指纹文件从该配置所在目录读取。
+默认配置和主机指纹来自 `%LOCALAPPDATA%\sshhelper`，不要求程序目录可写。GUI 与 MCP 可通过 `--data-dir` 或 `SSHHELPER_DATA_DIR` 选择同一个独立目录。需要旧版显式配置时可用 `-CredentialsPath` / `--credentials`，旧文件名及其旁边的固定指纹仍兼容读取。
 工具在每次调用时重新读取配置，服务器凭据、名称或刷新间隔变化后会重建相应采样器。
 配置损坏或不能解密会明确报错，不会静默改成仅本机。
 
@@ -119,7 +117,7 @@ SSH 失败后间隔约 3 秒重试。退出 MCP 进程会取消任务并释放�
 .\dist\sshhelper-tool.exe --snapshot
 ```
 
-默认配置为工具 EXE 同目录的 `AirSFTP.credentials`，可追加 `--credentials 完整路径`。
+默认配置为 `%LOCALAPPDATA%\sshhelper\sshhelper.credentials`；可用 `--data-dir 完整目录`，或显式 `--credentials 完整路径`。`--show-data-dir` 显示所用目录。
 无配置文件时提供本机监控。标准输出只有 JSON，启动错误写入标准错误并以非零状态退出。
 
 ## 安全与限制
@@ -127,7 +125,7 @@ SSH 失败后间隔约 3 秒重试。退出 MCP 进程会取消任务并释放�
 仅接受保存的主机配置，不能传入任意 SSH 命令、上传、下载或修改远端设置。
 MCP 服务不返回密码、用户名、私钥路径或口令；主机指纹必须事先存在，变化时拒绝连接，
 查询不会新增或修改指纹记录。主机名称、硬件标签、状态字符串按不可信数据处理。
-采样权限和可用传感器与 AirSFTP 相同；远端硬件缺失或无读取权限的指标为 `null`。
+采样权限和可用传感器与 sshhelper 相同；远端硬件缺失或无读取权限的指标为 `null`。
 本接口不读取 GUI 的传输进度，也不提供长期历史数据。
 
 ## 验证

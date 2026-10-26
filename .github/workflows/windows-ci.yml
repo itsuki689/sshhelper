@@ -3,8 +3,16 @@ name: Windows MinGW build and regression
 on:
   pull_request:
   push:
-    branches: [master, main]
+    branches: [master, main, 'codex/**']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      build_ref:
+        type: string
+        default: ''
+      release_tag:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -24,6 +32,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.build_ref || github.sha }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -47,11 +57,19 @@ jobs:
           mkdir -p build/logs
           { gcc --version; cmake --version; ninja --version; node --version; } 2>&1 | tee build/logs/toolchain.log
 
-      - name: Verify checked-in portable distribution
+      - name: Check public documentation
         shell: powershell
         run: |
-          & ./scripts/verify-dist.ps1
-          & ./tests/distribution_test.ps1
+          & ./tests/public_docs_test.ps1
+
+      - name: Require release source on the default branch
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git merge-base --is-ancestor HEAD origin/master
 
       - name: Configure
         run: |
@@ -71,11 +89,28 @@ jobs:
           ctest --test-dir build --no-tests=error --output-on-failure \
             --output-junit ctest-results.xml 2>&1 | tee build/logs/ctest.log
 
+      - name: Package and test the actual portable files
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          & ./scripts/package-release.ps1 -RequireClean -ReleaseTag $env:RELEASE_TAG
+          & ./tests/distribution_test.ps1 -PackageDirectory build/package
+          & ./scripts/test-portable.ps1 -PackageDirectory build/package
+
+      - name: Upload verified portable package
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: sshhelper-windows-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/release/*
+
       - name: Preserve diagnostics and built executables
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: windows-mingw-${{ github.sha }}
+          name: sshhelper-test-logs-${{ github.run_id }}
           retention-days: 14
           if-no-files-found: warn
           path: |
@@ -83,5 +118,4 @@ jobs:
             build/ctest-results.xml
             build/Testing/Temporary/Last*.log
             build/CMakeFiles/CMakeConfigureLog.yaml
-            build/AirSFTP.exe
-            build/sshhelper-tool.exe
+            build/portable-smoke.json

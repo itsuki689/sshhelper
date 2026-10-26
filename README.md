@@ -1,8 +1,8 @@
 # sshhelper
 
-一个约 4 MB 的 Windows 原生 SSH 文件传输与远程主机悬浮监控工具。没有 WebUI、Electron、Node.js 或 Python 运行时。
+一个轻量的 Windows 原生 SSH 文件传输与远程主机悬浮监控工具。没有 WebUI、Electron、Node.js 或 Python 运行时。
 
-另提供原生 `sshhelper-tool.exe`，通过本地 MCP 将即时监控交给 Codex。构建后执行
+另提供原生 `sshhelper-tool.exe`，通过本地 MCP 将即时监控交给 Codex。解压 Release 后执行
 `powershell -File scripts/register-codex-tool.ps1`，重新打开 Codex 会话，即可说
 “使用 sshhelper-tool 查看所有服务器当前监控”。工具复用已保存配置和主机指纹，独立于悬浮窗运行，
 不需要 OpenAI API Key。支持主机选择、立即采样与带时间戳的缓存读取；不返回登录凭据。
@@ -19,14 +19,14 @@
 - SSH 遥测：CPU 封装温度与功耗、各核心温度、机箱风扇、GPU 温度/风扇/功耗、内存、根分区存储、默认网卡上下行速度、SSH 命令首字节延迟。
 - 紧凑悬浮窗：Win32 + Direct2D，默认置顶；单击左上角主机名时，按窗口与当前显示器工作区左右边缘的距离，动画收起到最近的侧边（等距时选左侧），显示竖向状态条；双击标题空白处或拖到顶部收成横向延迟条，拖到左右边缘也可收成竖向状态条。主机名区域仍可拖动窗口，拖动后不触发单击收起；移出区域松手或捕获被取消时也不误收起。收起不影响监控和传输。收缩后可直接拖动，松手会按最近边缘自动切换横/竖形态，单击任意位置以平滑动画恢复。动画遵循 Windows 辅助功能设置。正常刷新由 Direct2D 一次提交完整帧，不先擦除窗口背景，避免周期采样或传输进度更新时闪烁。核心温度按高到低显示前三项；风扇较多时每 6 秒轮播。内存与存储卡片统一在标题右侧显示使用百分比，下方显示已用容量（十进制 GB），底部保留使用率进度条。
 - 原生设置面板：点击齿轮后，从靠近浮窗的一侧向可用空位平滑展开；优先避开主窗口和其他服务器窗口，并限制在屏幕工作区内。连接、文件传输、外观分为三个页签，圆角、按钮和配色与浮窗统一。标题、说明与按钮的自绘文字使用 DirectWrite，普通按钮和页签采用常规字重，仅标题保留加重；按当前 DPI 直接绘制，保留完整帧缓冲和 GDI 故障回退。再次点击齿轮、点击面板外部或按 Esc 会反向动画收起，颜色与文件选择器不触发误收起。支持标题拖动、小屏适配和跨显示器 DPI；遵循系统关闭动画的设置。切换页签、重复点击齿轮和本次运行内关闭重开都保留未保存输入，关闭不自动保存。
-- 密码或私钥认证：密码框在私钥模式下兼作密钥口令；全部服务器配置使用 Windows DPAPI 加密保存在 EXE 同目录的 `AirSFTP.credentials`，仅当前 Windows 用户可解密。
-- 主机密钥固定：首次连接显示目标主机、端口和可复制的 OpenSSH `SHA256:` 指纹，必须通过可信渠道核对并明确接受；成功保存 `AirSFTP.known_hosts` 后才认证。已有指纹兼容沿用，密钥改变继续拒绝连接。
+- 密码或私钥认证：密码框在私钥模式下兼作密钥口令；全部服务器配置使用 Windows DPAPI 加密保存在 `%LOCALAPPDATA%/sshhelper/sshhelper.credentials`，仅当前 Windows 用户可解密。
+- 主机密钥固定：首次连接显示目标主机、端口和可复制的 OpenSSH `SHA256:` 指纹，必须通过可信渠道核对并明确接受；成功保存用户数据目录中的 `sshhelper.known_hosts` 后才认证。已有指纹兼容沿用，密钥改变继续拒绝连接。
 
 连接与读写操作设有 15 秒超时；点击“停止传输”、删除服务器或从托盘退出程序时会取消任务，清理过程在后台完成；同一窗口传输期间不会启动另一批传输。传输只有在读取、写入、关闭及已知文件大小检查通过后才显示完成；失败或取消保留同目录的 `.airsftp-<标识>.part` 临时文件，原有目标保持不变；已经完成的文件保留。网卡切换或采样缺失后会重新建立速率基线。
 
 ## 直接使用
 
-1. [下载完整项目 ZIP](https://github.com/itsuki689/sshhelper/archive/refs/heads/master.zip)，解压后双击根目录的 `start.bat`。无需安装编译器；脚本先核验交付文件，再启动同目录的 `dist/AirSFTP.exe`。已有配置时先进入托盘后台连接，成功后显示窗口；首次使用自动打开设置页。
+1. [下载 Windows Release ZIP](https://github.com/itsuki689/sshhelper/releases/latest)，解压后双击解压目录的 `start.bat`。无需安装编译器；脚本先核验交付文件，再启动同目录的 `dist/sshhelper.exe`。已有配置时先进入托盘后台连接，成功后显示窗口；首次使用自动打开设置页。
 2. 点“设置”，填写主机、端口、用户名以及密码或私钥路径；加密私钥可在密码框填写口令。
 3. 点“连接并监控”保存配置。首次连接先核对并接受主机指纹，连接成功后开始每 2 秒采样。点击“新增服务器”打开新窗口，在新窗口填写另一台服务器；旧版单服务器配置会自动读入。
 4. 填写两个**文件夹路径**，例如本地 `D:\data`、远程 `/home/user/backup`。本地“浏览”按钮打开文件夹选择器；下载目标文件夹也可以手动输入尚未创建的完整路径。
@@ -57,7 +57,7 @@
 
 程序会读取 `/proc/cpuinfo` 的 CPU 名称自动选择功耗策略：Intel/Xeon 优先对 `/sys/class/powercap` 的 RAPL `energy_uj` 做采样差分，并自动汇总双路 CPU；其他处理器及 RAPL 不可用时继续使用上述 `lm-sensors` 策略。硬件驱动没有暴露或当前 SSH 用户无权读取的项目会显示为 `—`。
 
-2026-10-11 已为 `example.invalid` 的 SSH 账号 `test-user` 配置 RAPL 只读权限：CPU package 的 `energy_uj` 保持 root 所有，组设为该账号的私有主组，权限为 `0440`，未授予功耗限制写权限。`/usr/local/libexec/airsftp-rapl-read-access` 由已启用的 `airsftp-rapl-read.service` 在启动时执行，`/etc/udev/rules.d/90-airsftp-rapl-read.rules` 在设备重新出现时重新授权。已使用普通 SSH 账号和应用同一探针、解析器连续采样，读得约 2.6 W；首次采样建立基线，第二次起显示功耗。启动配置已验证并启用，本次未重启服务器。
+匿名 Linux 测试环境的 RAPL 只读方案：`energy_uj` 保持 root 所有，通过测试账号所在组授予 `0440` 读取权限，没有开放功耗限制写权限。systemd 开机任务和 udev 设备事件维持授权。普通账号使用应用同一探针连续采样，读得约 2.6 W；首次建立基线，第二次起显示功耗。
 
 功耗准确性复核：同日服务器端直接差分 `energy_uj` 得到 2.60–2.62 W，`turbostat` 的 `PkgWatt` 为 2.60–2.61 W，直接读取 MSR 包能耗寄存器并按其能量单位换算为 2.60–2.62 W。4 秒低优先级单线程对照中，CPU 总忙碌比例从 4.33% 升至 8.46%，计数器功耗从 2.615 W 升至 4.286 W，结束后回到 2.619 W。这确认了采集与换算一致、计数器响应负载，但三种方法共用 RAPL 数据源，不能证明绝对物理功耗准确；2.6 W 应理解为硬件上报值，尚未通过独立功率测量校验。
 
@@ -65,7 +65,7 @@ RAM、SSD 卡片容量保留一位小数，使用更大的 16 DIP 半粗字体�
 
 内存频率显示 SMBIOS 的 **Configured Memory Speed**，单位为 MT/s，属于 BIOS 配置传输速率，不是实时 DRAM 时钟；多条内存取有效配置值中的最低值。管理员可在服务器执行 `sudo sh scripts/install-memory-telemetry.sh`（需已有 dmidecode/systemd），该脚本安装 `airsftp-memory-rate.service`，开机时读取一次 DMI，将单个数值写入 root 所有、普通账号只读的 `/run/airsftp-telemetry/memory-rate-mts`。采样循环不运行 sudo/dmidecode；未配置服务时显示 `—`，修改 BIOS 或内存后随重启刷新，也可管理员手动重启该服务。脚本不会覆盖同名既有服务。显存频率为 NVIDIA 驱动 `clocks.current.memory` 返回的当前 MHz，并入已有 GPU 查询，旧驱动不支持时回退原字段且显示 `—`。
 
-2026-10-13 已在 `example.invalid` 启用内存速率服务，并以普通 SSH 账号验证 2133 MT/s、6800 MHz 和显存占用 21525/22528 MiB。新旧完整探针各采样 3 次：旧版中位耗时 145.94 ms、子进程 CPU 时间 63.38 ms；新版 149.00 ms、66.02 ms，新增输出约 20 字节。应用每轮结束后等待 2 秒，以上 CPU 时间不含 SSH 服务等额外开销，是当时负载下的小样本测量，不代表业务性能基准或所有机器的固定开销。
+2026-10-13 已在 匿名 Linux 测试主机 启用内存速率服务，并以普通 SSH 账号验证 2133 MT/s、6800 MHz 和显存占用 21525/22528 MiB。新旧完整探针各采样 3 次：旧版中位耗时 145.94 ms、子进程 CPU 时间 63.38 ms；新版 149.00 ms、66.02 ms，新增输出约 20 字节。应用每轮结束后等待 2 秒，以上 CPU 时间不含 SSH 服务等额外开销，是当时负载下的小样本测量，不代表业务性能基准或所有机器的固定开销。
 
 网络速度取默认路由网卡的 `/sys/class/net/.../statistics` 计数差；存储占用取根分区 `/`。延迟显示在顶部连接状态与设置按钮之间，仅显示数值和 `ms`；它是启动远程采样命令到收到首字节的耗时。底部最右侧显示同一网卡的协商速率（Mbps / Gbps），读取链路接通时的 `/sys/class/net/<网卡>/speed`；链路断开、驱动未提供速率或无读取权限时显示 `—`。该值是网卡链路速率，不代表实时传输速度或互联网带宽。
 
@@ -77,38 +77,46 @@ RAM、SSD 卡片容量保留一位小数，使用更大的 16 DIP 半粗字体�
 
 浮窗的关闭按钮和 Alt+F4 仍只隐藏窗口，已建立的监控和传输继续运行；**隐藏时尚在等待主机确认的连接会取消，需主动重新连接**。若同一确认仍有其他窗口的有效等待者，确认窗会保留给它们。单独关闭设置面板只隐藏面板，不取消信任确认。拒绝、取消和超时均结束本次监控连接循环，后台不会每 3 秒重复弹窗。
 
-`AirSFTP.known_hosts` 继续使用原来的 `host:port SHA256 十六进制摘要` 格式；确认界面将同一摘要转换为常见的无填充 Base64 `SHA256:` 形式。已知且匹配直接连接；改变的密钥不能通过首次确认覆盖。记录文件不可读、保存或原子替换失败均阻止认证。短时跨进程锁保护读取与重新读取/保存，等待用户不持有记录锁；保存保留其他主机的记录，刷新临时文件后原子替换。
+`sshhelper.known_hosts` 继续使用原 `AirSFTP.known_hosts` 的 `host:port SHA256 十六进制摘要` 格式；确认界面将同一摘要转换为常见的无填充 Base64 `SHA256:` 形式。已知且匹配直接连接；改变的密钥不能通过首次确认覆盖。记录文件不可读、保存或原子替换失败均阻止认证。短时跨进程锁保护读取与重新读取/保存，等待用户不持有记录锁；保存保留其他主机的记录，刷新临时文件后原子替换。
 
 `sshhelper-tool` / MCP 没有首次确认入口，始终仅使用已有固定记录。未知主机返回 `SSH host key is not pinned`，不弹窗、不创建或修改信任记录。
 
 实现与测试入口：`src/host_trust.*`（尝试、协调、持久化）、`src/host_trust_ui.*`（非模态 Win32 窗口）、`src/ssh_client.*`（认证前门禁）、`tests/host_trust_test.cpp` 和 `tests/app_host_trust_test.cpp`。大规模 UI 拆分与正式发行流程留待后续任务。
 
-## 便携交付来源与校验
+## 用户数据目录与旧版迁移
 
-项目 ZIP 中的 `dist` 只跟踪两个 EXE、`build-info.json` 和 `SHA256SUMS`，不包含账号、主机信任记录或历史备份。运行后生成的个人配置继续保存在 EXE 同目录。请完整解压项目，保留根目录的 `start.bat` 和 `scripts/verify-dist.ps1`；启动器会在任一文件缺失或校验不一致时退出，不会静默运行旧程序或自动编译。
+默认数据目录是 Windows 当前用户的 `%LOCALAPPDATA%\sshhelper`，凭据为 `sshhelper.credentials`，固定指纹为 `sshhelper.known_hosts`。程序可放在 Program Files 等受保护目录，正常保存不需要写入程序目录，也不需要管理员权限。GUI 与 MCP 共用相同的默认目录；读取路径或 MCP 查询不会创建信任记录。
 
-[build-info.json](dist/build-info.json) 中的 `source_commit` 是两个 EXE 的**构建源码提交**，`ci` 记录该提交对应的成功 Windows CI、运行尝试和工件 ID，`toolchain` 来自该工件的工具链日志，`files` 是分别针对解压后的两个 EXE 计算的 SHA256。`ci.archive_sha256` 单独表示 ZIP 摘要，不能拿来核验 EXE。首次信任回归 `host_trust`、`app_host_trust` 及 MCP stdio 的结果可沿这些记录追溯。
+GUI 和工具都支持 `--data-dir 完整目录`，也可设置 `SSHHELPER_DATA_DIR`；优先级为命令行目录、环境变量、Windows 用户数据目录。显式指定程序旁目录即可采用便携数据模式；该目录必须允许当前用户写入。`sshhelper-tool.exe --show-data-dir` 显示当前选择；工具还兼容 `--credentials 完整文件路径`，与 `--data-dir` 二选一。重启软件会保留当前数据目录。
 
-**交付提交**是随后更新二进制及说明的 Git 提交，通常晚于构建源码提交；有 Git 时执行 `git log -1 --format=%H -- dist/build-info.json` 查看，下载 ZIP 时可在 GitHub 的该文件历史中查看。构建说明不引用尚不存在的自身交付提交，也不以程序的产品版本字符串代替源码提交。
+旧版程序旁的配置不会被静默覆盖或删除。如需迁移，先退出旧版，然后运行：
 
-在项目根目录核验：
+```powershell
+.\dist\sshhelper.exe --migrate-legacy-data "D:\旧版程序目录"
+```
+
+迁移会验证凭据能由当前 Windows 用户解密，把凭据和已有指纹一起复制到用户目录；原文件保持不动。目标已经有凭据或指纹时拒绝覆盖，损坏或无法解密的来源也会报错。可配合 `--data-dir "D:\独立数据目录"` 迁移到其他位置。仍需直接使用旧文件的 MCP 用户可显式选择旧 `AirSFTP.credentials`，此时继续读取旁边的 `AirSFTP.known_hosts`。旧 v1–v4 配置可读，新保存为 v5；旧快捷键字段被丢弃。
+
+## Releases、来源与校验
+
+二进制只通过 [GitHub Releases](https://github.com/itsuki689/sshhelper/releases) 分发，源码仓库不再跟踪 EXE。下载 `sshhelper-v版本-windows-x64.zip`，完整解压后运行 `start.bat`。GitHub 的 Source code ZIP 只有源码；其中的启动器会提示下载 Release，不会自动编译或运行旧 EXE。首次 Release 尚未发布时请使用下面的本地构建方式。
+
+每次发布从准确的源码标签重新构建、通过全部离线 CTest，并对打包后的实际 EXE 做完整性与便携启动测试。Release 提供：Windows ZIP、校验 ZIP 的外层 `SHA256SUMS`、以及 `build-info.json`。ZIP 内的 `dist/SHA256SUMS` 分别校验两个 EXE，`dist/build-info.json` 记录产品版本、源码提交、工作区是否干净、CI URL/运行编号、工具链、测试列表、文件大小与 SHA256。
+
+本轮按维护者要求**跳过 Authenticode 签名**。构建说明会从实际文件读取并标注 `NotSigned`，SHA256 只用于完整性核验，不代表 Windows 代码签名。以后提供签名身份时需要独立接入并验证，不能把未签名文件描述成已签名。
+
+在 Release 解压目录核验：
 
 ```powershell
 powershell -NoProfile -File scripts/verify-dist.ps1
-Get-FileHash dist/AirSFTP.exe, dist/sshhelper-tool.exe -Algorithm SHA256
+Get-FileHash dist/sshhelper.exe, dist/sshhelper-tool.exe -Algorithm SHA256
 ```
 
-第一条命令同时检查构建说明、`SHA256SUMS` 和两个实际文件；也可在 `dist` 下使用 `sha256sum -c SHA256SUMS`。编译/CTest 通过与便携启动是两个验证阶段：`powershell -NoProfile -File scripts/test-portable.ps1` 会在含中文和空格的独立临时目录复制这四个文件及启动脚本，用仅包含 Windows 系统目录的 PATH 运行 `start.bat` 和 MCP 初始化，记录加载的模块及隔离配置检查，报告保存在 `build/portable-smoke.json`；会保留临时目录供检查。
+启动器会在文件缺失或校验不一致时退出。可另用 `sha256sum -c SHA256SUMS` 验证下载的 ZIP；外层校验文件只有 ZIP 摘要，EXE 摘要在 ZIP 内的校验文件中。当前运行中的 MCP 进程不会自动更换映像，替换本地文件后应重启 MCP 会话。
 
-维护者更新时，从选定的成功 CI 页面下载完整工件 ZIP，再执行：
+维护流程：合并到默认分支后创建与 CMake/Windows 产品版本一致的标签（例如 `v2.1.0`）并推送；`windows-release.yml` 复用 Windows CI，拒绝发布未进入默认分支的源码，测试/打包失败会阻止发布。工作流使用 GitHub 的标准 `GITHUB_TOKEN` 上传 Release，无需把私钥或二进制放进 Git；已存在的 Release 不会被静默覆盖。也可以手动选择已有标签运行发布工作流。
 
-```powershell
-powershell -NoProfile -File scripts/update-dist.ps1 -RunId 40277892828 -ArtifactId 12631160354 -ArchivePath "C:\Downloads\windows-mingw.zip"
-```
-
-脚本自动核对 CI 的 `head_sha`、成功状态、工件所属运行、ZIP 摘要及完整 CTest 报告，再计算 EXE 摘要并生成两份说明。网络访问 GitHub API 受限时，可设置已有的 `GH_TOKEN` / `GITHUB_TOKEN`，或通过 `-RunMetadataPath` 和 `-ArtifactMetadataPath` 提供从可信 GitHub 客户端保存的对应 API JSON 响应；校验规则相同。旧文件会备份到交付目录外的 `build/dist-backups`，替换失败时恢复；个人配置不动。已运行的 MCP 进程仍使用原映像，更新后应重启客户端的 MCP 会话以加载新文件。代码签名与完整 Release 系统留待独立任务。
-
-本批交付的已执行检查及未完成的交互冒烟见 [便携交付验收记录](docs/portable-delivery.md)。
+编译与 CTest、最终便携启动是分开的检查。`scripts/package-release.ps1` 自动生成发布文件；`tests/distribution_test.ps1` 验证篡改与缺失文件拒绝；`scripts/test-portable.ps1` 在含中文空格的临时目录使用系统 PATH 和隔离用户数据目录，测试 GUI 进程、MCP 初始化、模块加载及文件校验。详细复现与隐私历史处理状态见 [交付说明](docs/portable-delivery.md)。
 
 ## 一键构建便携 EXE
 
@@ -118,7 +126,7 @@ powershell -NoProfile -File scripts/update-dist.ps1 -RunId 40277892828 -Artifact
 build-exe.bat
 ```
 
-脚本会下载锁定版本的 libssh2，静态链接 WinCNG、C/C++ 运行库并执行测试。本地编译结果是 `build/AirSFTP.exe` 和 `build/sshhelper-tool.exe`，可直接运行；不会覆盖带 CI 来源和校验信息的 `dist`。更新正式跟踪的便携文件请使用上面的 CI 工件导入流程。最终程序仅依赖 Windows 系统运行库。
+脚本会下载锁定版本的 libssh2，静态链接 WinCNG、C/C++ 运行库并执行测试。本地编译结果是 `build/sshhelper.exe` 和 `build/sshhelper-tool.exe`，可直接运行；不会覆盖带 CI 来源和校验信息的 `dist`。正式分发由标签触发的 Releases 工作流负责。最终程序仅依赖 Windows 系统运行库。
 
 命令行等价操作：
 
@@ -134,7 +142,7 @@ ctest --test-dir build --output-on-failure
 
 CI 配置强制 `-DSSHHELPER_REQUIRE_NODE_TESTS=ON`；缺少 Node.js 时配置失败，不能静默跳过 stdio 测试。构建或 CTest 失败会直接使工作流失败；始终尝试保存工具链、配置、构建、CTest/JUnit 日志和成功生成的两个 EXE，保留 14 天。这些是测试构建产物，正式发行流程另行处理。
 
-本地复现 CI 的关键命令（需在可使用 DPAPI、快捷键和托盘的正常 Windows 用户会话中运行）：
+本地复现 CI 的关键命令（需在可使用 DPAPI 和托盘的正常 Windows 用户会话中运行）：
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DSSHHELPER_REQUIRE_NODE_TESTS=ON
@@ -142,19 +150,17 @@ cmake --build build --parallel 2
 ctest --test-dir build --no-tests=error --output-on-failure --output-junit ctest-results.xml
 ```
 
-2026-10-26 本地使用 MinGW-w64 GCC 12.1.0 / CMake 4.1.1 / Ninja 1.11.0 / Node.js 24.14.1 通过全部 13 项 CTest（包括 `host_trust`、`app_host_trust`、`mcp_stdio`），并验证强制模式下缺少 Node.js 会使配置失败。受限沙箱中的 DPAPI、文件替换和桌面 API 检查曾失败，在正常会话重跑后通过；CI 文件创建与本地通过不代表 GitHub 托管运行已经成功，远端结论以对应提交的 Actions 结果为准。
-
-首次干净 CI 在配置阶段发现 libssh2 提交压缩包与旧的压缩包校验值不一致。重新下载指定提交 `250045f77ad9c906f65d9071d134bf9f8f9652db` 后，其全部 513 个文件与本地既有依赖逐字节相同，已更新压缩包 SHA256；依赖提交与源码内容保持一致。
+本地使用 MinGW-w64 GCC 12.1.0 / CMake 4.1.1 / Ninja 1.11.0 / Node.js 24.14.1 通过全部 14 项 CTest（包括 `host_trust`、`app_host_trust`、`app_paths`、`mcp_stdio`），并验证强制模式下缺少 Node.js 会使配置失败。受限沙箱中的 DPAPI、文件替换和桌面 API 检查曾失败，在正常会话重跑后通过；CI 文件创建与本地通过不代表 GitHub 托管运行已经成功，远端结论以对应提交的 Actions 结果为准。
 
 ## 回归测试
 
 `ctest --test-dir build --output-on-failure` 覆盖遥测解析、凭据加密、回环 SSH 超时与取消、中文私钥路径，以及 MinGW 下的 SFTP 故障注入（短写、读写失败、关闭失败、文件大小不符和取消）、文件夹递归与部分选择上传/下载、空目录、中文路径及文件名冲突检查。新增多服务器配置往返、旧版迁移、损坏配置保护、拖放混合文件/目录、重名预检查及隐藏 Win32 窗口集成测试（独立关闭、窗口重建、过期消息过滤与收起状态颜色）。自动测试不需要真实 SSH 服务器或登录凭据，额外覆盖上传/下载续传、损坏断点重传、原子替换失败保护、5/6 文件确认边界和单批 SFTP 会话复用。窗口集成测试还覆盖隐藏启动、过期快照不显示窗口、连接成功后右下角排列、手动隐藏不取消传输、不被后续采样重新显示、托盘在线过滤和退出清理，以及设置页页签切换、输入保留、主题颜色、面板避让与动画中途关闭。
 
-只读温度诊断可显式构建 `live_telemetry_test`，运行参数为服务器地址和凭据文件路径，复用应用已有主机密钥固定文件；不会安装软件或修改远端配置。2026-10-11 在 `example.invalid` 的 E5-2690 v3 上验证：未安装 `sensors`，直接读取 `coretemp` 得到约 32°C 的封装温度和 12 个核心读数。之后按要求安装了 `lm-sensors`，`sensors -u` 同样可正常读取温度。
+只读温度诊断可显式构建 `live_telemetry_test`，运行参数为服务器地址和凭据文件路径，复用应用已有主机密钥固定文件；不会安装软件或修改远端配置。2026-10-11 在 匿名 Linux 测试主机 的 E5-2690 v3 上验证：未安装 `sensors`，直接读取 `coretemp` 得到约 32°C 的封装温度和 12 个核心读数。之后按要求安装了 `lm-sensors`，`sensors -u` 同样可正常读取温度。
 
 实机测试需显式构建并运行 `live_transfer_test`（不属于 CTest），参数依次为服务器地址、凭据文件路径、不存在的本地测试目录。只匹配该地址的保存配置，远端通过 `mktemp` 创建独立测试目录，测试后删除该目录；本地生成数据留在指定测试目录供检查。
 
-2026-10-11 在 `example.invalid` 上使用相同的 14 个文件（约 16 MiB，含空目录和中文文件名）进行对照。旧实现为 `bc216dc`，同一 Tailscale 直连链路：
+2026-10-11 在 匿名 Linux 测试主机 上使用相同的 14 个文件（约 16 MiB，含空目录和中文文件名）进行对照。旧实现为优化前版本，同一测试网络的直连链路：
 
 | 实现 | 上传 | 下载 |
 | --- | ---: | ---: |
@@ -172,13 +178,13 @@ ctest --test-dir build --no-tests=error --output-on-failure --output-junit ctest
 
 ## 本机监控
 
-运行软件的 Windows 主机会自动作为一个内置特殊服务器加入，启动后显示相同的监控浮窗；标题包含主机名和“本机”，顶部不显示 SSH 延迟。托盘“本机监控”可单独打开，也参与已连接窗口列表和快捷键切换。页面/文字颜色、侧边收起及每服务器刷新间隔继续生效；关闭窗口隐藏到托盘。内置本机不会重复创建，也不需要 SSH 服务、地址、密码或私钥；本机设置隐藏 SSH 字段，文件传输和拖放上传用于 SSH 服务器窗口。
+运行软件的 Windows 主机会自动作为一个内置特殊服务器加入，启动后显示相同的监控浮窗；标题包含主机名和“本机”，顶部不显示 SSH 延迟。托盘“本机监控”可单独打开，也参与已连接窗口列表。页面/文字颜色、侧边收起及每服务器刷新间隔继续生效；关闭窗口隐藏到托盘。内置本机不会重复创建，也不需要 SSH 服务、地址、密码或私钥；本机设置隐藏 SSH 字段，文件传输和拖放上传用于 SSH 服务器窗口。
 
 本机采样直接使用 Windows API：RAM 取物理内存使用量，SSD 容量显示 Windows 系统所在分区，SWAP 显示所有 Windows 页面文件的当前实际占用（不是提交内存，也不包括压缩内存）。网卡优先选默认路由上的物理接口，读取流量差分和链路速率；内存配置速率从 SMBIOS Type 17 读取并缓存。NVIDIA GPU 直接只读调用驱动已有 NVML，获取显存、温度、功耗、显存频率和受支持的风扇百分比，不额外启动命令行工具。
 
 SSD 温度尝试 Windows 存储温度查询；CPU 温度、逐核心温度和封装功耗兼容已经运行并发布 WMI 数据的 LibreHardwareMonitor/OpenHardwareMonitor。应用不安装驱动或传感器服务，不支持或无权限的指标显示 `—`；可用项目继续刷新。本机配置使用 v4 格式，兼容加载原 v1/v2/v3 配置，保留最多 64 台 SSH 服务器及一个本机。
 
-2026-10-15 在当前电脑验证：读取到主机名、约 64 GiB 物理内存、系统盘、页面文件占用、5600 MT/s RAM 配置速率、100 Mbps 网卡速率、29°C 系统盘温度及 RTX 5070 Ti Laptop 的显存/温度/功耗/显存频率。该机 NVML 风扇接口未提供有效读数，CPU 传感器服务未提供数据，对应项目显示 `—`。
+在一台 Windows 测试主机上验证：读取到主机名、约 64 GiB 物理内存、系统盘、页面文件占用、5600 MT/s RAM 配置速率、100 Mbps 网卡速率、29°C 系统盘温度及 RTX 5070 Ti Laptop 的显存/温度/功耗/显存频率。该机 NVML 风扇接口未提供有效读数，CPU 传感器服务未提供数据，对应项目显示 `—`。
 
 本机 CPU 针对 Ryzen 9 9955HX 优化：通过 GetSystemTimes 差分获取 CPU 忙碌时间占比，通过 Windows PDH 的 Processor Frequency 读取操作系统报告的动态频率，缓存物理核/逻辑处理器数量；本机参数行显示负载、MHz 和 16C/32T，与 GPU 参数行共用列位置，负载百分比、频率与右侧参数分别竖向对齐；本机与远端窗口的表头共用状态点位置及文字垂直中心。采样不启动 PowerShell/WMI 命令行，不安装驱动，也不改变频率、电源计划或功耗限制。
 
@@ -186,4 +192,4 @@ CPU 卡片优先显示真实 CPU 传感器温度；无法读取时尝试 Windows
 
 Ryzen 硬件传感器映射优先 Core (Tdie)/Core (Tctl/Tdie)，其次 Tctl 和 Package；CCD1/CCD2 单独存储，忽略 CCD Max/Average 重复汇总，不混作封装或逐核心温度。功耗只接受 CPU 标识下有效的 Package Power，忽略功耗限制、核心域和无效值。已有 LibreHardwareMonitor/OpenHardwareMonitor 在监控启动后打开时，后台每 30 秒重新发现一次，避免必须重启整个程序。
 
-2026-10-15 在本机 AMD Ryzen 9 9955HX 上验证：正确识别 16 核/32 线程，短样本读得约 1.1% 忙碌占比、2021 MHz 动态频率和 61.55°C Windows 温区；CPU 封装温度及封装功耗仍无有效硬件来源。
+在采用 AMD Ryzen 9 9955HX 的 Windows 测试环境中验证：正确识别 16 核/32 线程，短样本读得约 1.1% 忙碌占比、2021 MHz 动态频率和 61.55°C Windows 温区；CPU 封装温度及封装功耗仍无有效硬件来源。

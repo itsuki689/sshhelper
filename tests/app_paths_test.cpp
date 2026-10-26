@@ -26,6 +26,7 @@ int main() {
     CHECK(dataDirectory(root / "explicit") == root / "explicit");
     CHECK(hostKeyPathForCredentials(defaultCredentialPath()) == user / "sshhelper.known_hosts");
     CHECK(hostKeyPathForCredentials(root / "AirSFTP.credentials") == root / "AirSFTP.known_hosts");
+    CHECK(hostKeyPathForCredentials(root / "airsftp.credentials") == root / "AirSFTP.known_hosts");
 
     ServerSettings settings;
     ServerProfile profile; profile.name = "Legacy"; profile.connection.host = "example.invalid";

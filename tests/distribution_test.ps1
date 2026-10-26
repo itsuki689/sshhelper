@@ -1,6 +1,8 @@
+param([string]$PackageDirectory = "build/package")
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $verify = Join-Path $project 'scripts\verify-dist.ps1'
+$package = [IO.Path]::GetFullPath($PackageDirectory)
 $root = Join-Path ([IO.Path]::GetTempPath()) ('airsftp-dist-test-' + [guid]::NewGuid().ToString('N'))
 $dist = Join-Path $root 'dist'
 [IO.Directory]::CreateDirectory($dist) | Out-Null
@@ -9,11 +11,11 @@ function Reject([scriptblock]$Action, [string]$Message) {
     throw "Expected rejection: $Message"
 }
 try {
-    foreach ($name in @('AirSFTP.exe', 'sshhelper-tool.exe', 'build-info.json', 'SHA256SUMS')) {
-        Copy-Item -LiteralPath (Join-Path $project "dist\$name") -Destination $dist
+    foreach ($name in @('sshhelper.exe', 'sshhelper-tool.exe', 'build-info.json', 'SHA256SUMS')) {
+        Copy-Item -LiteralPath (Join-Path $package "dist\$name") -Destination $dist
     }
     & $verify -Directory $dist
-    $exe = Join-Path $dist 'AirSFTP.exe'
+    $exe = Join-Path $dist 'sshhelper.exe'
     $stream = [IO.File]::Open($exe, 'Open', 'Write')
     try { $stream.WriteByte(0) } finally { $stream.Dispose() }
     Reject { & $verify -Directory $dist } 'tampered executable'
@@ -28,16 +30,16 @@ try {
     $launch = [Diagnostics.Process]::Start($launchInfo)
     if (!$launch.WaitForExit(5000)) { $launch.Kill(); throw 'Launch refusal timed out.' }
     if ($launch.ExitCode -eq 0) { throw 'start.bat accepted a modified executable.' }
-    Copy-Item -LiteralPath (Join-Path $project 'dist\AirSFTP.exe') -Destination $exe -Force
+    Copy-Item -LiteralPath (Join-Path $package 'dist\sshhelper.exe') -Destination $exe -Force
     $manifest = Join-Path $dist 'build-info.json'
     $info = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
-    $info.ci.head_sha = '0000000000000000000000000000000000000000'
+    $info.source_commit = 'invalid-commit'
     $info | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifest -Encoding UTF8
     Reject { & $verify -Directory $dist } 'mismatched source and CI head'
-    Copy-Item -LiteralPath (Join-Path $project 'dist\build-info.json') -Destination $manifest -Force
+    Copy-Item -LiteralPath (Join-Path $package 'dist\build-info.json') -Destination $manifest -Force
     Add-Content -LiteralPath (Join-Path $dist 'SHA256SUMS') -Value ('0' * 64 + '  unexpected.exe')
     Reject { & $verify -Directory $dist } 'extra checksum entry'
-    Copy-Item -LiteralPath (Join-Path $project 'dist\SHA256SUMS') -Destination (Join-Path $dist 'SHA256SUMS') -Force
+    Copy-Item -LiteralPath (Join-Path $package 'dist\SHA256SUMS') -Destination (Join-Path $dist 'SHA256SUMS') -Force
     [IO.File]::Delete((Join-Path $dist 'sshhelper-tool.exe'))
     Reject { & $verify -Directory $dist } 'missing companion executable'
     Write-Output 'Distribution integrity, provenance mismatch, missing file and launch refusal passed.'

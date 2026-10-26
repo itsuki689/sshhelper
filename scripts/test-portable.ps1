@@ -1,11 +1,12 @@
-param([switch]$LeaveRunning)
+param([string]$PackageDirectory = "build/package", [switch]$LeaveRunning)
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
-$root = Join-Path ([IO.Path]::GetTempPath()) ('AirSFTP ' + [char]0x4ea4 + [char]0x4ed8 + ' smoke ' + [guid]::NewGuid().ToString('N'))
+$package = [IO.Path]::GetFullPath($PackageDirectory)
+$root = Join-Path ([IO.Path]::GetTempPath()) ('sshhelper ' + [char]0x4ea4 + [char]0x4ed8 + ' smoke ' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory((Join-Path $root 'dist')) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $root 'scripts')) | Out-Null
-foreach ($name in @('AirSFTP.exe', 'sshhelper-tool.exe', 'build-info.json', 'SHA256SUMS')) {
-    Copy-Item -LiteralPath (Join-Path $project "dist\$name") -Destination (Join-Path $root 'dist')
+foreach ($name in @('sshhelper.exe', 'sshhelper-tool.exe', 'build-info.json', 'SHA256SUMS')) {
+    Copy-Item -LiteralPath (Join-Path $package "dist\$name") -Destination (Join-Path $root 'dist')
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'verify-dist.ps1') -Destination (Join-Path $root 'scripts')
 Copy-Item -LiteralPath (Join-Path $project 'start.bat') -Destination $root
@@ -17,6 +18,7 @@ function StartInfo([string]$Executable, [string]$Arguments) {
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
     $info.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $info.EnvironmentVariables['PATH'] = $path
+    $info.EnvironmentVariables['SSHHELPER_DATA_DIR'] = Join-Path $root 'User data'
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     return $info
 }
@@ -29,7 +31,7 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 100
-        $gui = Get-Process AirSFTP -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $root 'dist\AirSFTP.exe') }
+        $gui = Get-Process sshhelper -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $root 'dist\sshhelper.exe') }
     } while (!$gui -and [DateTime]::UtcNow -lt $deadline)
     if (!$gui -or @($gui).Count -ne 1) { throw 'The delivered GUI did not stay running.' }
     Start-Sleep -Seconds 1
