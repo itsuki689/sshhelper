@@ -6,6 +6,10 @@ node_modules/
 npm-debug.log*
 AirSFTP.known_hosts
 AirSFTP.credentials
+sshhelper.credentials
+sshhelper.known_hosts
+*.credentials.tmp
+*.known_hosts.tmp-*
 dist/*
 *.exe
 *.pfx
