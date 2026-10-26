@@ -1,0 +1,81 @@
+name: Windows MinGW build and regression
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          # Keep setup-node's Windows node.exe on PATH inside the MSYS2 shell.
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Record toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p build/logs
+          { gcc --version; cmake --version; ninja --version; node --version; } 2>&1 | tee build/logs/toolchain.log
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DSSHHELPER_REQUIRE_NODE_TESTS=ON 2>&1 | tee build/logs/configure.log
+
+      - name: Build all offline test targets and applications
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel 2 2>&1 | tee build/logs/build.log
+
+      - name: Run every offline CTest including MCP stdio
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --no-tests=error --output-on-failure \
+            --output-junit ctest-results.xml 2>&1 | tee build/logs/ctest.log
+
+      - name: Preserve diagnostics and built executables
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-mingw-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/logs/
+            build/ctest-results.xml
+            build/Testing/Temporary/Last*.log
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/AirSFTP.exe
+            build/sshhelper-tool.exe

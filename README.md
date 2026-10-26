@@ -102,6 +102,22 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure
 ```
 
+## Windows CI
+
+[Windows 构建与回归](https://github.com/itsuki689/sshhelper/actions/workflows/windows-ci.yml) 在 pull request、`master` / `main` 更新和手动触发时运行。工作流使用 Windows 2022、MSYS2 UCRT64 的 MinGW GCC、CMake、Ninja，以及 Node.js 24。全量构建后执行全部离线 CTest，包括真实启动原生 MCP 进程的 stdio 测试；SSH 测试只用本地桩与回环服务，不使用远程账号或 Secrets。
+
+CI 配置强制 `-DSSHHELPER_REQUIRE_NODE_TESTS=ON`；缺少 Node.js 时配置失败，不能静默跳过 stdio 测试。构建或 CTest 失败会直接使工作流失败；始终尝试保存工具链、配置、构建、CTest/JUnit 日志和成功生成的两个 EXE，保留 14 天。这些是测试构建产物，正式发行流程另行处理。
+
+本地复现 CI 的关键命令（需在可使用 DPAPI、快捷键和托盘的正常 Windows 用户会话中运行）：
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DSSHHELPER_REQUIRE_NODE_TESTS=ON
+cmake --build build --parallel 2
+ctest --test-dir build --no-tests=error --output-on-failure --output-junit ctest-results.xml
+```
+
+2026-10-26 本地使用 MinGW-w64 GCC 12.1.0 / CMake 4.1.1 / Ninja 1.11.0 / Node.js 24.14.1 通过全部 13 项 CTest（包括 `host_trust`、`app_host_trust`、`mcp_stdio`），并验证强制模式下缺少 Node.js 会使配置失败。受限沙箱中的 DPAPI、文件替换和桌面 API 检查曾失败，在正常会话重跑后通过；CI 文件创建与本地通过不代表 GitHub 托管运行已经成功，远端结论以对应提交的 Actions 结果为准。
+
 ## 回归测试
 
 `ctest --test-dir build --output-on-failure` 覆盖遥测解析、凭据加密、回环 SSH 超时与取消、中文私钥路径，以及 MinGW 下的 SFTP 故障注入（短写、读写失败、关闭失败、文件大小不符和取消）、文件夹递归与部分选择上传/下载、空目录、中文路径及文件名冲突检查。新增多服务器配置往返、旧版迁移、损坏配置保护、拖放混合文件/目录、重名预检查及隐藏 Win32 窗口集成测试（独立关闭、窗口重建、过期消息过滤与收起状态颜色）。自动测试不需要真实 SSH 服务器或登录凭据，额外覆盖上传/下载续传、损坏断点重传、原子替换失败保护、5/6 文件确认边界和单批 SFTP 会话复用。窗口集成测试还覆盖隐藏启动、过期快照不显示窗口、连接成功后右下角排列、手动隐藏不取消传输、不被后续采样重新显示、托盘在线过滤和退出清理，以及设置页页签切换、输入保留、主题颜色、面板避让与动画中途关闭。
