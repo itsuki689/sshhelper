@@ -40,6 +40,7 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           printf '%s\n' \
             'Windows x64 portable package. Extract the complete ZIP and run start.bat.' \
+            'The ZIP includes the MIT license (LICENSE) and dependency license texts (third-party-licenses/).' \
             'SHA256SUMS verifies the ZIP; dist/SHA256SUMS inside verifies both EXEs.' \
             'Authenticode signing is skipped for this release; inspect build-info.json for each EXE status.' \
             'Data is stored in %LOCALAPPDATA%\sshhelper. Source and CI are recorded in build-info.json.' > release-notes.txt
