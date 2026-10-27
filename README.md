@@ -2,6 +2,8 @@
 
 一个轻量的 Windows 原生 SSH 文件传输与远程主机悬浮监控工具。没有 WebUI、Electron、Node.js 或 Python 运行时。
 
+本项目采用 [MIT 许可证](LICENSE)。第三方依赖保留各自的许可证；构建发布 ZIP 时会附带项目 `LICENSE` 和 `third-party-licenses/` 中的依赖许可文本。
+
 另提供原生 `sshhelper-tool.exe`，通过本地 MCP 将即时监控交给 Codex。解压 Release 后执行
 `powershell -File scripts/register-codex-tool.ps1`，重新打开 Codex 会话，即可说
 “使用 sshhelper-tool 查看所有服务器当前监控”。工具复用已保存配置和主机指纹，独立于悬浮窗运行，

@@ -66,8 +66,17 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $dist 'build-info.json'), ($metadata | ConvertTo-Json -Depth 8) + "`n", $utf8)
 [IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS'), (($files | ForEach-Object { "$($_.sha256)  $($_.name)" }) -join "`n") + "`n", $utf8)
 Copy-Item -LiteralPath (Join-Path $project 'start.bat') -Destination $output
+Copy-Item -LiteralPath (Join-Path $project 'LICENSE') -Destination $output
+$dependencyLicenses = Join-Path $output 'third-party-licenses'
+[IO.Directory]::CreateDirectory($dependencyLicenses) | Out-Null
+foreach ($license in @(
+    @{ source = '_deps/libssh2-src/COPYING'; name = 'libssh2.txt' },
+    @{ source = '_deps/json-src/LICENSE.MIT'; name = 'nlohmann-json.txt' }
+)) {
+    Copy-Item -LiteralPath (Join-Path $build $license.source) -Destination (Join-Path $dependencyLicenses $license.name)
+}
 foreach ($name in @('verify-dist.ps1', 'register-codex-tool.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $scripts }
-$readme = "sshhelper $version`r`nRun start.bat. Data: %LOCALAPPDATA%\sshhelper (override: --data-dir DIR or SSHHELPER_DATA_DIR).`r`nAuthenticode status is recorded per EXE in dist/build-info.json; this release may be unsigned.`r`nVerify: powershell -NoProfile -File scripts/verify-dist.ps1`r`nSource and CI: dist/build-info.json`r`nDocumentation: https://github.com/itsuki689/sshhelper`r`n"
+$readme = "sshhelper $version`r`nRun start.bat. Data: %LOCALAPPDATA%\sshhelper (override: --data-dir DIR or SSHHELPER_DATA_DIR).`r`nAuthenticode status is recorded per EXE in dist/build-info.json; this release may be unsigned.`r`nLicense: MIT (LICENSE). Dependency licenses: third-party-licenses/.`r`nVerify: powershell -NoProfile -File scripts/verify-dist.ps1`r`nSource and CI: dist/build-info.json`r`nDocumentation: https://github.com/itsuki689/sshhelper`r`n"
 [IO.File]::WriteAllText((Join-Path $output 'README.txt'), $readme, $utf8)
 & (Join-Path $PSScriptRoot 'verify-dist.ps1') -Directory $dist
 [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($ArchiveDirectory)) | Out-Null
